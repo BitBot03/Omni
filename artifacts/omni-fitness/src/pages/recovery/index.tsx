@@ -1,90 +1,194 @@
 import { useState, useEffect } from "react";
-import { Activity, Wind } from "lucide-react";
+import { Wind } from "lucide-react";
 import { motion } from "framer-motion";
-import { cn } from "@/lib/utils";
+
+const TEAL = "#00D4FF";
+const ORANGE = "#FF7A00";
+const GREEN = "#39FF14";
+
+const phases = ["INHALE", "HOLD", "EXHALE", "REST"] as const;
+type Phase = typeof phases[number];
+const phaseDurations: Record<Phase, number> = { INHALE: 4000, HOLD: 4000, EXHALE: 4000, REST: 2000 };
+const phaseColors: Record<Phase, string> = { INHALE: TEAL, HOLD: "#8B5CF6", EXHALE: ORANGE, REST: GREEN };
+
+function RecoveryBar({ label, value, max, color }: { label: string; value: number; max: number; color: string }) {
+  return (
+    <div className="space-y-1.5">
+      <div className="flex justify-between">
+        <span className="stat-label">{label}</span>
+        <span className="text-xs font-black" style={{ color }}>{value}<span className="text-muted-foreground font-normal">/{max}</span></span>
+      </div>
+      <div className="h-1.5 bg-white/8 rounded-full overflow-hidden">
+        <motion.div
+          initial={{ width: 0 }}
+          animate={{ width: `${(value / max) * 100}%` }}
+          transition={{ duration: 1.2, ease: "easeOut" }}
+          className="h-full rounded-full"
+          style={{ background: color, boxShadow: `0 0 6px ${color}` }}
+        />
+      </div>
+    </div>
+  );
+}
 
 export default function RecoveryHub() {
-  const [breathingPhase, setBreathingPhase] = useState<"inhale" | "hold" | "exhale" | "rest">("inhale");
+  const [phase, setPhase] = useState<Phase>("INHALE");
   const [isBreathing, setIsBreathing] = useState(false);
+  const [seconds, setSeconds] = useState(0);
 
   useEffect(() => {
     if (!isBreathing) return;
-
-    let timer: NodeJS.Timeout;
-    if (breathingPhase === "inhale") timer = setTimeout(() => setBreathingPhase("hold"), 4000);
-    else if (breathingPhase === "hold") timer = setTimeout(() => setBreathingPhase("exhale"), 4000);
-    else if (breathingPhase === "exhale") timer = setTimeout(() => setBreathingPhase("rest"), 4000);
-    else timer = setTimeout(() => setBreathingPhase("inhale"), 4000);
-
+    const timer = setTimeout(() => {
+      const nextIdx = (phases.indexOf(phase) + 1) % phases.length;
+      setPhase(phases[nextIdx]);
+    }, phaseDurations[phase]);
     return () => clearTimeout(timer);
-  }, [breathingPhase, isBreathing]);
+  }, [phase, isBreathing]);
+
+  useEffect(() => {
+    if (!isBreathing) { setSeconds(0); return; }
+    const t = setInterval(() => setSeconds(s => s + 1), 1000);
+    return () => clearInterval(t);
+  }, [isBreathing]);
+
+  const color = phaseColors[phase];
 
   return (
-    <div className="p-6 md:p-8 space-y-8 pb-24 md:pb-8">
+    <div className="p-4 md:p-6 space-y-5 pb-24 md:pb-6">
+
       <header>
-        <h1 className="text-3xl md:text-4xl font-bold tracking-tight">Recovery</h1>
-        <p className="text-muted-foreground mt-2">Optimize your downtime</p>
+        <p className="stat-label mb-0.5">CNS RECOVERY</p>
+        <h1 className="font-display text-4xl md:text-5xl text-white uppercase italic tracking-wide">Recovery</h1>
       </header>
 
-      <div className="grid grid-cols-1 md:grid-cols-2 gap-8">
-        <section className="glass-panel p-8 rounded-3xl flex flex-col items-center justify-center min-h-[400px]">
-          <h2 className="text-xl font-bold mb-8">Box Breathing</h2>
-          
-          <div className="relative w-64 h-64 flex items-center justify-center mb-8 cursor-pointer" onClick={() => setIsBreathing(!isBreathing)}>
-            {/* Base circle */}
-            <div className="absolute inset-0 rounded-full border-4 border-secondary/20" />
-            
-            {/* Animated breathing circle */}
-            <motion.div
-              className="absolute bg-secondary/30 rounded-full blur-xl"
-              animate={{
-                width: isBreathing && (breathingPhase === "inhale" || breathingPhase === "hold") ? 256 : 100,
-                height: isBreathing && (breathingPhase === "inhale" || breathingPhase === "hold") ? 256 : 100,
-                opacity: isBreathing && (breathingPhase === "inhale" || breathingPhase === "hold") ? 0.8 : 0.3,
-              }}
-              transition={{ duration: 4, ease: "easeInOut" }}
-            />
-            
-            <div className="relative z-10 text-center">
-              {isBreathing ? (
-                <div className="text-2xl font-bold text-glow-secondary capitalize">{breathingPhase}</div>
-              ) : (
-                <div className="flex flex-col items-center">
-                  <Wind className="w-8 h-8 mb-2 text-secondary" />
-                  <span className="font-bold">Tap to Start</span>
-                </div>
-              )}
-            </div>
-          </div>
-          
-          <div className="flex gap-4 text-sm text-muted-foreground">
-            <span>Inhale 4s</span> • <span>Hold 4s</span> • <span>Exhale 4s</span> • <span>Hold 4s</span>
-          </div>
-        </section>
+      <div className="grid grid-cols-1 md:grid-cols-3 gap-4">
 
-        <section className="space-y-4">
-          <h2 className="text-2xl font-bold">Daily Metrics</h2>
-          <div className="space-y-4">
-            <div className="glass-panel p-4 rounded-xl">
-              <label className="text-sm font-bold text-muted-foreground block mb-2">Morning Weight (lbs)</label>
-              <input type="number" className="bg-black/50 border border-border rounded-lg px-4 py-3 w-full font-mono text-xl focus:ring-1 focus:ring-primary outline-none" placeholder="0.0" />
+        {/* Breathing */}
+        <motion.div
+          initial={{ opacity: 0, y: 12 }}
+          animate={{ opacity: 1, y: 0 }}
+          className="omni-card p-5 md:col-span-1 flex flex-col items-center"
+        >
+          <div className="flex items-center justify-between w-full mb-5">
+            <p className="stat-label">BOX BREATHING</p>
+            <Wind className="w-4 h-4 text-muted-foreground" />
+          </div>
+
+          <div
+            className="relative w-52 h-52 flex items-center justify-center cursor-pointer mb-5"
+            onClick={() => setIsBreathing(!isBreathing)}
+          >
+            {/* Outer ring */}
+            <div className="absolute inset-0 rounded-full border border-white/10" />
+            {/* Animated pulse */}
+            <motion.div
+              className="absolute rounded-full"
+              animate={{
+                width: isBreathing && (phase === "INHALE" || phase === "HOLD") ? 200 : 100,
+                height: isBreathing && (phase === "INHALE" || phase === "HOLD") ? 200 : 100,
+                opacity: isBreathing ? 0.35 : 0.1,
+              }}
+              transition={{ duration: phaseDurations[phase] / 1000, ease: "easeInOut" }}
+              style={{ background: color, filter: "blur(20px)" }}
+            />
+            {/* Center circle */}
+            <motion.div
+              className="relative z-10 rounded-full border-2 flex items-center justify-center w-28 h-28"
+              animate={{ borderColor: color, boxShadow: `0 0 20px ${color}50` }}
+              transition={{ duration: 0.5 }}
+            >
+              <div className="text-center">
+                {isBreathing ? (
+                  <>
+                    <p className="text-sm font-black tracking-widest" style={{ color }}>{phase}</p>
+                    <p className="stat-label">{Math.round(phaseDurations[phase] / 1000)}s</p>
+                  </>
+                ) : (
+                  <p className="stat-label">TAP TO START</p>
+                )}
+              </div>
+            </motion.div>
+          </div>
+
+          {isBreathing && (
+            <div className="flex items-center gap-2 mb-3">
+              {phases.map(p => (
+                <div
+                  key={p}
+                  className="h-1 flex-1 rounded-full transition-all duration-300"
+                  style={{ background: p === phase ? phaseColors[p] : "rgba(255,255,255,0.1)" }}
+                />
+              ))}
             </div>
-            <div className="glass-panel p-4 rounded-xl">
-              <label className="text-sm font-bold text-muted-foreground block mb-2">Sleep (Hours)</label>
-              <input type="number" step="0.5" className="bg-black/50 border border-border rounded-lg px-4 py-3 w-full font-mono text-xl focus:ring-1 focus:ring-primary outline-none" placeholder="0.0" />
+          )}
+
+          <div className="flex justify-between w-full">
+            <div>
+              <p className="stat-label">ELAPSED</p>
+              <p className="text-lg font-black text-white">
+                {Math.floor(seconds / 60)}:{String(seconds % 60).padStart(2, "0")}
+              </p>
             </div>
-            <div className="glass-panel p-4 rounded-xl">
-              <label className="text-sm font-bold text-muted-foreground block mb-2">Readiness Score (1-10)</label>
-              <div className="flex gap-2">
-                {[...Array(10)].map((_, i) => (
-                  <div key={i} className="flex-1 h-12 rounded-lg bg-black/50 border border-border flex items-center justify-center cursor-pointer hover:bg-primary/20 hover:text-primary transition-colors">
-                    {i + 1}
-                  </div>
-                ))}
+            <div className="text-right">
+              <p className="stat-label">CYCLES</p>
+              <p className="text-lg font-black" style={{ color: TEAL }}>
+                {Math.floor(seconds / 16)}
+              </p>
+            </div>
+          </div>
+        </motion.div>
+
+        {/* Recovery Metrics */}
+        <motion.div
+          initial={{ opacity: 0, y: 12 }}
+          animate={{ opacity: 1, y: 0 }}
+          transition={{ delay: 0.1 }}
+          className="omni-card p-5 space-y-5"
+        >
+          <p className="stat-label">RECOVERY METRICS</p>
+          <RecoveryBar label="SLEEP QUALITY" value={7.5} max={9} color={TEAL} />
+          <RecoveryBar label="HRV SCORE" value={68} max={100} color={GREEN} />
+          <RecoveryBar label="CNS READINESS" value={82} max={100} color={TEAL} />
+          <RecoveryBar label="SORENESS LEVEL" value={3} max={10} color={ORANGE} />
+          <RecoveryBar label="HYDRATION" value={2.1} max={3} color="#8B5CF6" />
+        </motion.div>
+
+        {/* Muscle Recovery Status */}
+        <motion.div
+          initial={{ opacity: 0, y: 12 }}
+          animate={{ opacity: 1, y: 0 }}
+          transition={{ delay: 0.15 }}
+          className="omni-card p-5 space-y-5"
+        >
+          <p className="stat-label">MUSCLE RECOVERY STATUS</p>
+          {[
+            { label: "CHEST", pct: 68, color: ORANGE },
+            { label: "BACK", pct: 92, color: GREEN },
+            { label: "SHOULDERS", pct: 55, color: ORANGE },
+            { label: "LEGS", pct: 85, color: TEAL },
+            { label: "ARMS", pct: 78, color: TEAL },
+            { label: "CORE", pct: 95, color: GREEN },
+          ].map(({ label, pct, color }) => (
+            <div key={label} className="space-y-1">
+              <div className="flex justify-between items-center">
+                <span className="stat-label">{label}</span>
+                <span className="text-xs font-bold" style={{ color }}>
+                  {pct >= 80 ? "READY" : pct >= 60 ? "PARTIAL" : "FATIGUED"}
+                </span>
+              </div>
+              <div className="h-1.5 bg-white/8 rounded-full overflow-hidden">
+                <motion.div
+                  initial={{ width: 0 }}
+                  animate={{ width: `${pct}%` }}
+                  transition={{ duration: 1.2, ease: "easeOut" }}
+                  className="h-full rounded-full"
+                  style={{ background: color, boxShadow: `0 0 5px ${color}` }}
+                />
               </div>
             </div>
-          </div>
-        </section>
+          ))}
+        </motion.div>
+
       </div>
     </div>
   );

@@ -1,84 +1,168 @@
-import { LineChart, Line, XAxis, YAxis, CartesianGrid, Tooltip, ResponsiveContainer, RadarChart, PolarGrid, PolarAngleAxis, PolarRadiusAxis, Radar } from "recharts";
-import { Brain, TrendingUp } from "lucide-react";
+import {
+  BarChart, Bar, XAxis, YAxis, CartesianGrid, Tooltip, ResponsiveContainer,
+  LineChart, Line, Cell
+} from "recharts";
 import { useGetDashboardSummary } from "@workspace/api-client-react";
+import { motion } from "framer-motion";
 
-const mockRadarData = [
-  { subject: "Chest", A: 120, fullMark: 150 },
-  { subject: "Back", A: 98, fullMark: 150 },
-  { subject: "Legs", A: 86, fullMark: 150 },
-  { subject: "Shoulders", A: 99, fullMark: 150 },
-  { subject: "Arms", A: 85, fullMark: 150 },
-  { subject: "Core", A: 65, fullMark: 150 },
-];
+const TEAL = "#00D4FF";
+const ORANGE = "#FF7A00";
+const GREEN = "#39FF14";
+
+const dayLabels = ["MON", "TUE", "WED", "THU", "FRI", "SAT", "SUN"];
+
+function MuscleBar({ label, pct, color = TEAL, delay = 0 }: { label: string; pct: number; color?: string; delay?: number }) {
+  return (
+    <motion.div
+      initial={{ opacity: 0, x: -10 }}
+      animate={{ opacity: 1, x: 0 }}
+      transition={{ delay }}
+      className="space-y-1.5"
+    >
+      <div className="flex justify-between items-center">
+        <span className="stat-label">{label}</span>
+        <span className="text-xs font-black" style={{ color }}>{pct}%</span>
+      </div>
+      <div className="h-1.5 rounded-full bg-white/8 overflow-hidden">
+        <motion.div
+          initial={{ width: 0 }}
+          animate={{ width: `${pct}%` }}
+          transition={{ duration: 1.2, ease: "easeOut", delay: delay + 0.2 }}
+          className="h-full rounded-full"
+          style={{ background: color, boxShadow: `0 0 6px ${color}` }}
+        />
+      </div>
+    </motion.div>
+  );
+}
+
+function InsightCard({ title, body, color }: { title: string; body: string; color: string }) {
+  return (
+    <div
+      className="p-4 rounded-2xl flex flex-col gap-2"
+      style={{ background: `${color}10`, border: `1px solid ${color}25` }}
+    >
+      <p className="stat-label" style={{ color }}>{title}</p>
+      <p className="text-xs text-muted-foreground leading-relaxed">{body}</p>
+    </div>
+  );
+}
 
 export default function AnalyticsHub() {
   const { data: summary } = useGetDashboardSummary();
+  const weeklyVolume = summary?.weeklyVolume ?? [];
 
-  const volumeData = summary?.weeklyVolume || [];
+  const today = new Date().getDay();
+  const todayIdx = today === 0 ? 6 : today - 1;
+  const chartData = dayLabels.map((day, i) => ({
+    day,
+    volume: weeklyVolume[i]?.volume ?? 0,
+    isToday: i === todayIdx,
+  }));
 
   return (
-    <div className="p-6 md:p-8 space-y-8 pb-24 md:pb-8">
+    <div className="p-4 md:p-6 space-y-5 pb-24 md:pb-6">
+
       <header>
-        <h1 className="text-3xl md:text-4xl font-bold tracking-tight">Analytics</h1>
-        <p className="text-muted-foreground mt-2">Data-driven performance</p>
+        <p className="stat-label mb-0.5">PERFORMANCE INTEL</p>
+        <h1 className="font-display text-4xl md:text-5xl text-white uppercase italic tracking-wide">Analytics</h1>
       </header>
 
-      <div className="grid grid-cols-1 md:grid-cols-2 gap-8">
-        <section className="glass-panel p-6 rounded-3xl">
-          <h2 className="text-xl font-bold mb-6 flex items-center gap-2">
-            <TrendingUp className="w-5 h-5 text-primary" />
-            Weekly Volume
-          </h2>
-          <div className="h-64">
+      <div className="grid grid-cols-1 md:grid-cols-3 gap-4">
+
+        {/* Volume Chart */}
+        <motion.div
+          initial={{ opacity: 0, y: 12 }}
+          animate={{ opacity: 1, y: 0 }}
+          className="omni-card p-5 md:col-span-2"
+        >
+          <div className="flex justify-between items-start mb-4">
+            <div>
+              <p className="stat-label">WEEKLY TRAINING VOLUME</p>
+              <p className="text-[10px] text-muted-foreground tracking-widest">LBS / WEEK</p>
+            </div>
+            <span
+              className="text-[9px] font-black tracking-widest px-2 py-0.5 rounded"
+              style={{ color: TEAL, background: "rgba(0,212,255,0.1)", border: "1px solid rgba(0,212,255,0.2)" }}
+            >
+              LIVE
+            </span>
+          </div>
+          <div className="h-48">
             <ResponsiveContainer width="100%" height="100%">
-              <LineChart data={volumeData}>
-                <CartesianGrid strokeDasharray="3 3" stroke="rgba(255,255,255,0.1)" />
-                <XAxis dataKey="date" stroke="rgba(255,255,255,0.5)" tickFormatter={(val) => val.split('-')[2]} />
-                <YAxis stroke="rgba(255,255,255,0.5)" />
-                <Tooltip 
-                  contentStyle={{ backgroundColor: 'rgba(15,15,15,0.9)', borderColor: 'rgba(255,255,255,0.1)', borderRadius: '8px' }}
-                  itemStyle={{ color: '#39FF14' }}
+              <BarChart data={chartData} barCategoryGap="35%" margin={{ top: 4, right: 0, left: -20, bottom: 0 }}>
+                <CartesianGrid strokeDasharray="3 3" stroke="rgba(255,255,255,0.05)" vertical={false} />
+                <XAxis
+                  dataKey="day"
+                  tick={{ fill: "rgba(255,255,255,0.35)", fontSize: 9, fontWeight: 600, letterSpacing: "0.08em" }}
+                  axisLine={false} tickLine={false}
                 />
-                <Line type="monotone" dataKey="volume" stroke="hsl(var(--primary))" strokeWidth={3} dot={{ fill: 'hsl(var(--primary))', r: 4 }} activeDot={{ r: 6 }} />
-              </LineChart>
+                <YAxis
+                  tick={{ fill: "rgba(255,255,255,0.25)", fontSize: 9 }}
+                  axisLine={false} tickLine={false}
+                />
+                <Tooltip
+                  cursor={{ fill: "rgba(255,255,255,0.03)" }}
+                  contentStyle={{ background: "#111", border: "1px solid rgba(255,255,255,0.1)", borderRadius: "8px", fontSize: "11px" }}
+                  formatter={(val: number) => [`${val.toLocaleString()} lbs`, ""]}
+                />
+                <Bar dataKey="volume" radius={[4, 4, 0, 0]} maxBarSize={36}>
+                  {chartData.map((entry, idx) => (
+                    <Cell
+                      key={idx}
+                      fill={entry.isToday ? TEAL : "rgba(255,255,255,0.09)"}
+                      style={{ filter: entry.isToday ? `drop-shadow(0 0 6px ${TEAL})` : "none" }}
+                    />
+                  ))}
+                </Bar>
+              </BarChart>
             </ResponsiveContainer>
           </div>
-        </section>
+        </motion.div>
 
-        <section className="glass-panel p-6 rounded-3xl">
-          <h2 className="text-xl font-bold mb-6">Muscle Focus</h2>
-          <div className="h-64">
-            <ResponsiveContainer width="100%" height="100%">
-              <RadarChart cx="50%" cy="50%" outerRadius="80%" data={mockRadarData}>
-                <PolarGrid stroke="rgba(255,255,255,0.1)" />
-                <PolarAngleAxis dataKey="subject" tick={{ fill: 'rgba(255,255,255,0.7)', fontSize: 12 }} />
-                <PolarRadiusAxis angle={30} domain={[0, 150]} tick={false} axisLine={false} />
-                <Radar name="Sets" dataKey="A" stroke="hsl(var(--secondary))" fill="hsl(var(--secondary))" fillOpacity={0.3} strokeWidth={2} />
-              </RadarChart>
-            </ResponsiveContainer>
-          </div>
-        </section>
+        {/* Muscle Breakdown */}
+        <motion.div
+          initial={{ opacity: 0, y: 12 }}
+          animate={{ opacity: 1, y: 0 }}
+          transition={{ delay: 0.1 }}
+          className="omni-card p-5 space-y-4"
+        >
+          <p className="stat-label">MUSCLE SATURATION</p>
+          <MuscleBar label="CHEST (PEC MAJOR)" pct={88} color={ORANGE} delay={0.2} />
+          <MuscleBar label="DELTOIDS" pct={34} color={TEAL} delay={0.25} />
+          <MuscleBar label="TRICEPS" pct={72} color={TEAL} delay={0.3} />
+          <MuscleBar label="QUADRICEPS" pct={91} color={ORANGE} delay={0.35} />
+          <MuscleBar label="LATS" pct={55} color={TEAL} delay={0.4} />
+          <MuscleBar label="HAMSTRINGS" pct={61} color={GREEN} delay={0.45} />
+        </motion.div>
 
-        <section className="md:col-span-2 glass-panel p-6 rounded-3xl">
-          <h2 className="text-xl font-bold mb-6 flex items-center gap-2">
-            <Brain className="w-5 h-5 text-secondary" />
-            AI Insights
-          </h2>
-          <div className="grid grid-cols-1 md:grid-cols-3 gap-4">
-            <div className="bg-black/30 p-4 rounded-xl border border-primary/20">
-              <h3 className="font-bold text-primary mb-1">Strong Correlation</h3>
-              <p className="text-sm text-muted-foreground">Days with 7+ hours of sleep show a 15% increase in average lifting volume.</p>
-            </div>
-            <div className="bg-black/30 p-4 rounded-xl border border-secondary/20">
-              <h3 className="font-bold text-secondary mb-1">Recovery Note</h3>
-              <p className="text-sm text-muted-foreground">Your chest recovery is lagging behind. Consider an extra rest day before pressing.</p>
-            </div>
-            <div className="bg-black/30 p-4 rounded-xl border border-border">
-              <h3 className="font-bold mb-1">Habit Trend</h3>
-              <p className="text-sm text-muted-foreground">You've hit your protein goal 6 days in a row. Keep the streak alive!</p>
-            </div>
+        {/* AI Insights */}
+        <motion.div
+          initial={{ opacity: 0, y: 12 }}
+          animate={{ opacity: 1, y: 0 }}
+          transition={{ delay: 0.15 }}
+          className="md:col-span-3"
+        >
+          <p className="stat-label mb-3">AI-DERIVED INSIGHTS</p>
+          <div className="grid grid-cols-1 md:grid-cols-3 gap-3">
+            <InsightCard
+              title="STRONG CORRELATION"
+              body="Days with 7+ hours of sleep show a 15% increase in average lifting volume. Protect your sleep window."
+              color={TEAL}
+            />
+            <InsightCard
+              title="RECOVERY NOTE"
+              body="Your chest recovery is lagging. Consider an extra rest day before the next push session to maximize gains."
+              color={ORANGE}
+            />
+            <InsightCard
+              title="HABIT TREND"
+              body="Protein goal hit 6 days in a row. Maintaining consistent nutrition directly supports muscle protein synthesis."
+              color={GREEN}
+            />
           </div>
-        </section>
+        </motion.div>
+
       </div>
     </div>
   );

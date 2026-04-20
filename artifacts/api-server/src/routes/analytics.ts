@@ -65,16 +65,36 @@ router.get("/analytics/dashboard", async (_req, res): Promise<void> => {
     checkDate.setDate(checkDate.getDate() - 1);
   }
 
+  const latestMetric = await db.select().from(bodyMetricsTable).orderBy(desc(bodyMetricsTable.date)).limit(1);
+  const sleepScore = latestMetric[0]?.sleepHours ? Math.min(100, Math.round((latestMetric[0].sleepHours / 9) * 100)) : null;
+  const moodScore = latestMetric[0]?.moodScore ? latestMetric[0].moodScore * 10 : null;
+  const workoutFreqScore = Math.min(100, workoutsThisWeek * 14);
+  const computedReadiness = sleepScore && moodScore
+    ? Math.round((sleepScore * 0.4) + (moodScore * 0.3) + (workoutFreqScore * 0.3))
+    : Math.round(50 + workoutFreqScore * 0.5);
+
+  const thirtyAgo = new Date();
+  thirtyAgo.setDate(thirtyAgo.getDate() - 30);
+  const thirtyAgoStr = thirtyAgo.toISOString().split("T")[0];
+  const thirtyDayHabitLogs = await db.select().from(habitLogsTable).where(
+    and(gte(habitLogsTable.date, thirtyAgoStr), eq(habitLogsTable.completed, true))
+  );
+  const expectedHabitCompletions = habits.length * 30;
+  const habitConsistency = expectedHabitCompletions > 0
+    ? Math.min(1, thirtyDayHabitLogs.length / expectedHabitCompletions)
+    : 0.85;
+
   res.json({
     todayCalories: Math.round(todayCalories),
     todayProtein: Math.round(todayProtein),
     calorieGoal,
     workoutsThisWeek,
     currentStreak,
-    readinessScore: null,
+    readinessScore: computedReadiness,
     totalVolumeToday,
     habitsCompletedToday,
     totalHabits: habits.length,
+    habitConsistency: Math.round(habitConsistency * 1000) / 1000,
     recentWorkouts: enrichedRecent,
     weeklyVolume,
   });
