@@ -19,7 +19,7 @@ A premium offline-first fitness and health OS web app. Features a polished dark 
 ## App Modules
 
 - **Dashboard** - God Mode overview: streak, readiness, volume, calories, habits, weekly chart
-- **Workouts** - Workout history, live workout player, routine builder, exercise list, local workout logging
+- **Workouts** - Professional workout hub with offline exercise library, routine templates, detailed routine builder, live session logging, RPE/tempo/rest tracking, warm-up helper, workout options, local history, guide caching, and animated stick-figure posture models
 - **Nutrition** - Daily macro tracking, food database, meal logging, habit completion
 - **Recovery** - Recovery metrics, breathing exercise timer, muscle recovery status
 - **Analytics** - Muscle saturation, volume charts, performance insights
@@ -35,6 +35,10 @@ A premium offline-first fitness and health OS web app. Features a polished dark 
 ## Offline Behavior
 
 The web app does not use TypeScript, Tailwind, React, Vue, Angular, Next.js, or API calls for core app features. All core app data is stored locally in the browser using localStorage. The app can be opened from the HTML/CSS/JS files directly, with hash-based navigation for offline compatibility. The Google Fonts import improves typography when internet is available, while local system font fallbacks keep the app functional offline.
+
+## Workout Tab Notes
+
+The Workouts tab is implemented entirely in `artifacts/omni-fitness/app.js` and `artifacts/omni-fitness/styles.css`. Exercise guides include built-in offline metadata and can cache an offline guide entry. If the user has an OpenAI API key saved and is online, guide caching can enhance notes with AI-generated coaching text before saving locally.
 
 ## Legacy API Routes
 
