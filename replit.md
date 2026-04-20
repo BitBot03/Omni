@@ -2,61 +2,39 @@
 
 ## Overview
 
-A premium full-stack fitness and health OS web app. Features dark glassmorphism aesthetic (OLED blacks, neon green #39FF14 and electric blue #00D4FF accents). Built with React + Vite frontend and Express 5 backend.
+A premium offline-first fitness and health OS web app. Features dark glassmorphism aesthetic (OLED blacks, neon green #39FF14 and electric blue #00D4FF accents). The web app has been converted to static HTML, CSS, and vanilla JavaScript so the app can load and run from local files without internet. AI coaching is the only feature designed to require internet, and uses a locally stored Bring Your Own Key OpenAI configuration.
 
 ## Stack
 
 - **Monorepo tool**: pnpm workspaces
 - **Node.js version**: 24
 - **Package manager**: pnpm
-- **TypeScript version**: 5.9
-- **Frontend**: React + Vite, Tailwind CSS, Radix UI, Recharts, Framer Motion, Wouter
-- **API framework**: Express 5
-- **Database**: PostgreSQL + Drizzle ORM
-- **Validation**: Zod (`zod/v4`), `drizzle-zod`
-- **API codegen**: Orval (from OpenAPI spec)
-- **Build**: esbuild (CJS bundle)
+- **Frontend artifact**: Plain HTML + CSS + vanilla JavaScript
+- **Offline storage**: Browser localStorage
+- **Preview server**: Node.js static file server (`artifacts/omni-fitness/server.js`)
+- **API framework**: Express 5 API artifact remains in the project but is no longer required by the offline web app
+- **Database**: PostgreSQL + Drizzle ORM remains for the API artifact but is no longer required by the offline web app
 
 ## App Modules
 
 - **Dashboard** - God Mode overview: streak, readiness, volume, calories, habits, weekly chart
-- **Workouts** - Workout history, live workout player, routine builder, exercise library (20+ built-in)
-- **Nutrition** - Daily macro tracking, food database (25+ foods), meal logging, nutrition goals
-- **Recovery** - Body metrics log, recovery logs, breathing exercises, pain journal
-- **Analytics** - Muscle heatmap, habit heatmap (365-day), volume charts, correlation insights, PRs
-- **AI Coach** - BYOK (Bring Your Own Key) OpenAI GPT integration with context-aware prompting
-- **Settings** - Profile, nutrition goals, data management
+- **Workouts** - Workout history, live workout player, routine builder, exercise list, local workout logging
+- **Nutrition** - Daily macro tracking, food database, meal logging, habit completion
+- **Recovery** - Recovery metrics, breathing exercise timer, muscle recovery status
+- **Analytics** - Muscle saturation, volume charts, performance insights
+- **AI Coach** - BYOK OpenAI chat integration; requires internet and a saved API key
+- **Settings** - Profile, nutrition goals, AI key/model, local export/import/clear data
 
 ## Key Commands
 
-- `pnpm run typecheck` — full typecheck across all packages
-- `pnpm run build` — typecheck + build all packages
-- `pnpm --filter @workspace/api-spec run codegen` — regenerate API hooks and Zod schemas from OpenAPI spec
-- `pnpm --filter @workspace/db run push` — push DB schema changes (dev only)
-- `pnpm --filter @workspace/api-server run dev` — run API server locally
+- `pnpm --filter @workspace/omni-fitness run dev` — run the offline static web app preview server
+- `pnpm --filter @workspace/omni-fitness run build` — no-op static app build confirmation
+- `pnpm --filter @workspace/api-server run dev` — run API server locally if needed for legacy/API work
 
-## Database Schema
+## Offline Behavior
 
-Tables: `exercises`, `workouts`, `workout_sets`, `routines`, `foods`, `nutrition_logs`, `nutrition_goals`, `habits`, `habit_logs`, `body_metrics`, `recovery_logs`
+The web app does not use TypeScript, Tailwind, React, Vue, Angular, Next.js, external fonts, CDN assets, or API calls for core app features. All core app data is stored locally in the browser using localStorage. The app can be opened from the HTML/CSS/JS files directly, with hash-based navigation for offline compatibility.
 
-## API Routes
+## Legacy API Routes
 
-- `GET/POST /api/exercises` — Exercise library
-- `GET/POST/PATCH/DELETE /api/workouts` — Workout management
-- `GET/POST/PATCH/DELETE /api/routines` — Workout routines
-- `GET/POST/DELETE /api/nutrition/logs` — Food logging
-- `GET /api/nutrition/foods` — Food database search
-- `GET/PUT /api/nutrition/goals` — Macro goals
-- `GET/POST/PATCH/DELETE /api/habits` — Habit management
-- `GET/POST /api/habits/logs` — Habit completion logs
-- `GET/POST /api/body-metrics` — Weight, sleep, mood tracking
-- `GET/POST /api/recovery/logs` — Recovery session logs
-- `GET /api/analytics/dashboard` — Dashboard summary
-- `GET /api/analytics/volume` — Volume progression data
-- `GET /api/analytics/muscle-heatmap` — Muscle recovery status
-- `GET /api/analytics/habit-heatmap` — 365-day habit grid
-- `GET /api/analytics/correlations` — AI-derived insights
-- `GET /api/analytics/streaks` — Streak tracking and PRs
-- `POST /api/ai/chat` — AI coach (OpenAI BYOK)
-
-See the `pnpm-workspace` skill for workspace structure, TypeScript setup, and package details.
+The API artifact still contains the prior Express routes for workouts, nutrition, habits, recovery, analytics, and AI. The offline web app no longer depends on them for loading or core functionality.
