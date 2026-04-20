@@ -2,7 +2,7 @@
 
 ## Overview
 
-A premium offline-first fitness and health OS web app. Features dark glassmorphism aesthetic (OLED blacks, neon green #39FF14 and electric blue #00D4FF accents). The web app has been converted to static HTML, CSS, and vanilla JavaScript so the app can load and run from local files without internet. AI coaching is the only feature designed to require internet, and uses a locally stored Bring Your Own Key OpenAI configuration.
+A premium offline-first fitness and health OS web app. Features a polished dark glassmorphism interface with OLED blacks, neon green #39FF14, electric blue #00D4FF, refined card hierarchy, vector-style navigation icons, responsive mobile navigation, and professional typography. The web app uses static HTML, CSS, and vanilla JavaScript so the app can load and run from local files without internet. AI coaching is the only feature designed to require internet, and uses a locally stored Bring Your Own Key OpenAI configuration.
 
 ## Stack
 
@@ -12,6 +12,7 @@ A premium offline-first fitness and health OS web app. Features dark glassmorphi
 - **Frontend artifact**: Plain HTML + CSS + vanilla JavaScript
 - **Offline storage**: Browser localStorage
 - **Preview server**: Node.js static file server (`artifacts/omni-fitness/server.js`)
+- **Typography**: Google Fonts import for Inter + Space Grotesk when online, with system font fallbacks for offline use
 - **API framework**: Express 5 API artifact remains in the project but is no longer required by the offline web app
 - **Database**: PostgreSQL + Drizzle ORM remains for the API artifact but is no longer required by the offline web app
 
@@ -33,7 +34,7 @@ A premium offline-first fitness and health OS web app. Features dark glassmorphi
 
 ## Offline Behavior
 
-The web app does not use TypeScript, Tailwind, React, Vue, Angular, Next.js, external fonts, CDN assets, or API calls for core app features. All core app data is stored locally in the browser using localStorage. The app can be opened from the HTML/CSS/JS files directly, with hash-based navigation for offline compatibility.
+The web app does not use TypeScript, Tailwind, React, Vue, Angular, Next.js, or API calls for core app features. All core app data is stored locally in the browser using localStorage. The app can be opened from the HTML/CSS/JS files directly, with hash-based navigation for offline compatibility. The Google Fonts import improves typography when internet is available, while local system font fallbacks keep the app functional offline.
 
 ## Legacy API Routes
 
