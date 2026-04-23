@@ -1,5 +1,5 @@
 const DB_NAME = 'apexDB';
-const DB_VERSION = 1;
+const DB_VERSION = 2;
 
 let dbPromise = null;
 
@@ -10,34 +10,82 @@ function initDB() {
 
         request.onupgradeneeded = (event) => {
             const db = event.target.result;
+            const oldVersion = event.oldVersion;
 
-            if (!db.objectStoreNames.contains('exerciseLibrary')) db.createObjectStore('exerciseLibrary', { keyPath: 'id' });
-            if (!db.objectStoreNames.contains('customExercises')) db.createObjectStore('customExercises', { keyPath: 'id' });
-            
-            if (!db.objectStoreNames.contains('programFolders')) db.createObjectStore('programFolders', { keyPath: 'id' });
-            if (!db.objectStoreNames.contains('routines')) db.createObjectStore('routines', { keyPath: 'id' });
-            if (!db.objectStoreNames.contains('routineBlocks')) db.createObjectStore('routineBlocks', { keyPath: 'id' });
-            if (!db.objectStoreNames.contains('routineItems')) db.createObjectStore('routineItems', { keyPath: 'id' });
-            
-            if (!db.objectStoreNames.contains('workoutSessions')) {
+            // ── V1 Stores ────────────────────────────────────────
+            if (oldVersion < 1) {
+                db.createObjectStore('exerciseLibrary', { keyPath: 'id' });
+                db.createObjectStore('customExercises', { keyPath: 'id' });
+                db.createObjectStore('programFolders', { keyPath: 'id' });
+
                 const ws = db.createObjectStore('workoutSessions', { keyPath: 'id' });
                 ws.createIndex('date', 'startedAt', { unique: false });
-            }
-            if (!db.objectStoreNames.contains('workoutSets')) {
+
                 const wsets = db.createObjectStore('workoutSets', { keyPath: 'id' });
                 wsets.createIndex('sessionId', 'sessionId', { unique: false });
                 wsets.createIndex('exerciseId', 'exerciseId', { unique: false });
-            }
-            if (!db.objectStoreNames.contains('personalRecords')) {
+
                 const pr = db.createObjectStore('personalRecords', { keyPath: 'id' });
                 pr.createIndex('exerciseId', 'exerciseId', { unique: true });
-            }
-            if (!db.objectStoreNames.contains('activeSession')) {
+
                 db.createObjectStore('activeSession', { keyPath: 'id' });
-            }
-            if (!db.objectStoreNames.contains('muscleLoad')) {
+
                 const ml = db.createObjectStore('muscleLoad', { keyPath: 'id' });
                 ml.createIndex('weekKey', 'weekKey', { unique: false });
+            } else {
+                // Ensure legacy stores exist if migrating from v1
+                if (!db.objectStoreNames.contains('exerciseLibrary')) db.createObjectStore('exerciseLibrary', { keyPath: 'id' });
+                if (!db.objectStoreNames.contains('customExercises')) db.createObjectStore('customExercises', { keyPath: 'id' });
+                if (!db.objectStoreNames.contains('programFolders')) db.createObjectStore('programFolders', { keyPath: 'id' });
+                if (!db.objectStoreNames.contains('workoutSessions')) {
+                    const ws = db.createObjectStore('workoutSessions', { keyPath: 'id' });
+                    ws.createIndex('date', 'startedAt', { unique: false });
+                }
+                if (!db.objectStoreNames.contains('workoutSets')) {
+                    const wsets = db.createObjectStore('workoutSets', { keyPath: 'id' });
+                    wsets.createIndex('sessionId', 'sessionId', { unique: false });
+                    wsets.createIndex('exerciseId', 'exerciseId', { unique: false });
+                }
+                if (!db.objectStoreNames.contains('personalRecords')) {
+                    const pr = db.createObjectStore('personalRecords', { keyPath: 'id' });
+                    pr.createIndex('exerciseId', 'exerciseId', { unique: true });
+                }
+                if (!db.objectStoreNames.contains('activeSession')) db.createObjectStore('activeSession', { keyPath: 'id' });
+                if (!db.objectStoreNames.contains('muscleLoad')) {
+                    const ml = db.createObjectStore('muscleLoad', { keyPath: 'id' });
+                    ml.createIndex('weekKey', 'weekKey', { unique: false });
+                }
+            }
+
+            // ── V2 Stores — Routines Planning Engine ────────────
+            if (oldVersion < 2) {
+                // Recreate routines stores with proper indexes (safe — no user data in these yet)
+                if (db.objectStoreNames.contains('routines')) db.deleteObjectStore('routines');
+                if (db.objectStoreNames.contains('routineBlocks')) db.deleteObjectStore('routineBlocks');
+                if (db.objectStoreNames.contains('routineItems')) db.deleteObjectStore('routineItems');
+
+                const routinesStore = db.createObjectStore('routines', { keyPath: 'id' });
+                routinesStore.createIndex('programId', 'programId', { unique: false });
+                routinesStore.createIndex('assignedDay', 'assignedDay', { unique: false });
+                routinesStore.createIndex('order', 'order', { unique: false });
+
+                const blocksStore = db.createObjectStore('routineBlocks', { keyPath: 'id' });
+                blocksStore.createIndex('routineId', 'routineId', { unique: false });
+                blocksStore.createIndex('order', 'order', { unique: false });
+
+                const itemsStore = db.createObjectStore('routineItems', { keyPath: 'id' });
+                itemsStore.createIndex('routineId', 'routineId', { unique: false });
+                itemsStore.createIndex('blockId', 'blockId', { unique: false });
+                itemsStore.createIndex('order', 'order', { unique: false });
+
+                if (!db.objectStoreNames.contains('programs')) {
+                    const programsStore = db.createObjectStore('programs', { keyPath: 'id' });
+                    programsStore.createIndex('order', 'order', { unique: false });
+                }
+
+                if (!db.objectStoreNames.contains('routineTemplates')) {
+                    db.createObjectStore('routineTemplates', { keyPath: 'id' });
+                }
             }
         };
 
@@ -108,6 +156,26 @@ const apexDB = {
             req.onsuccess = () => resolve(req.result);
             req.onerror = () => reject(req.error);
         });
+    },
+    async putBatch(storeName, items) {
+        const db = await initDB();
+        return new Promise((resolve, reject) => {
+            const tx = db.transaction(storeName, 'readwrite');
+            const store = tx.objectStore(storeName);
+            items.forEach(item => store.put(item));
+            tx.oncomplete = () => resolve();
+            tx.onerror = () => reject(tx.error);
+        });
+    },
+    async deleteBatch(storeName, ids) {
+        const db = await initDB();
+        return new Promise((resolve, reject) => {
+            const tx = db.transaction(storeName, 'readwrite');
+            const store = tx.objectStore(storeName);
+            ids.forEach(id => store.delete(id));
+            tx.oncomplete = () => resolve();
+            tx.onerror = () => reject(tx.error);
+        });
     }
 };
 
@@ -115,7 +183,6 @@ const apexDB = {
 async function seedExercisesToDB() {
     const existing = await apexDB.getAll('exerciseLibrary');
     if (existing.length === 0) {
-        // Assume exerciseLibrary array is globally available from data.js
         if (typeof exerciseLibrary !== 'undefined') {
             for (const ex of exerciseLibrary) {
                 await apexDB.put('exerciseLibrary', {
