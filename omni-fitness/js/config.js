@@ -1,0 +1,27 @@
+const TEAL="#00D4FF";
+const GREEN="#39FF14";
+const ORANGE="#FF7A00";
+const PURPLE="#8B5CF6";
+const STORE_KEY="omniFitnessOfflineState.v1";
+const icons={
+  dashboard: Icons.dashboard(24),
+  workouts: Icons.workouts(24),
+  nutrition: Icons.nutrition(24),
+  recovery: Icons.recovery(24),
+  analytics: Icons.analytics(24),
+  ai: Icons.aicoach(24),
+  settings: Icons.settings(24),
+  play: Icons.play(24),
+  plus: Icons.plus(24),
+  check: Icons.checkFill(24),
+  calendar: Icons.calendar(24),
+  wind: Icons.breathwork(24),
+  moon: Icons.moon(24),
+  flame: Icons.flame(24),
+  snow: Icons.snow(24),
+  sunrise: Icons.sunrise(24),
+  playCircle: Icons.playCircle(24),
+  mindIntegration: Icons.mindIntegration(24),
+  univMobility: Icons.univMobility(24),
+  univProtocol: Icons.univProtocol(24)
+};
