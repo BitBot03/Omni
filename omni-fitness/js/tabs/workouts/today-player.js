@@ -11,7 +11,8 @@ window.wkTodayHelpers = (() => {
         if (s.includes('assist')) return 'assisted_weight_reps';
         if (s.includes('body'))   return 'bodyweight_reps';
         if (s.includes('distance')) return 'distance_time';
-        if (s === 'time' || s.includes('time') && !s.includes('reps')) return 'time';
+        if (s === 'weight_time' || (s.includes('weight') && s.includes('time'))) return 'weight_time';
+        if (s === 'time' || (s.includes('time') && !s.includes('reps'))) return 'time';
         return 'weight_reps';
     }
 
@@ -118,7 +119,6 @@ window.wkOpenSetModal = function(sessionExerciseId, setIndex) {
         distance: existing ? Number(existing.distance) || 0 : (prevSet ? Number(prevSet.distance) || 1 : 1),
         distanceUnit: existing ? (existing.distanceUnit || 'km') : (prevSet ? (prevSet.distanceUnit || 'km') : 'km'),
         type:   existing ? (existing.type || 'working') : 'working',
-        rpe:    existing ? (existing.rpe || ex.targetRPE || 7) : (ex.targetRPE || 7),
         notes:  existing ? (existing.notes || '') : ''
     };
 
@@ -151,18 +151,6 @@ window.wkOpenSetModal = function(sessionExerciseId, setIndex) {
         </div>`;
     }
 
-    function fieldRPE() {
-        if (!settings.enableRPE) return '';
-        return `
-        <div class="wk-today-field">
-            <p class="wk-today-field-label"><span>RPE</span><span style="color:var(--muted);">Rate of Perceived Exertion</span></p>
-            <div class="wk-today-rpe">
-                <input type="range" min="1" max="10" step="0.5" value="${state.rpe}" id="wkSet_rpe" class="slider" />
-                <span class="wk-today-rpe-val" id="wkSet_rpeVal">${state.rpe}</span>
-            </div>
-        </div>`;
-    }
-
     function fieldDuration() {
         const m = Math.floor(state.durationSec / 60);
         const s = state.durationSec % 60;
@@ -189,6 +177,9 @@ window.wkOpenSetModal = function(sessionExerciseId, setIndex) {
         body += fieldStepper(`Assistance (${units})`, 'weight', step, { sub: 'reduces bodyweight' });
     } else if (tt === 'time') {
         body += fieldDuration();
+    } else if (tt === 'weight_time') {
+        body += fieldStepper(`Weight (${units})`, 'weight', step);
+        body += fieldDuration();
     } else if (tt === 'distance_time') {
         body += `
         <div class="wk-today-field">
@@ -212,7 +203,6 @@ window.wkOpenSetModal = function(sessionExerciseId, setIndex) {
         { value:'failure', label:'Failure' },
         { value:'tempo',   label:'Tempo' }
     ]);
-    body += fieldRPE();
     body += `
         <div class="wk-today-field">
             <p class="wk-today-field-label"><span>Notes</span><span style="color:var(--muted);">optional</span></p>
@@ -280,15 +270,6 @@ window.wkOpenSetModal = function(sessionExerciseId, setIndex) {
         });
     });
 
-    // RPE
-    const rpeInp = overlay.querySelector('#wkSet_rpe');
-    if (rpeInp) {
-        rpeInp.oninput = () => {
-            state.rpe = Number(rpeInp.value);
-            overlay.querySelector('#wkSet_rpeVal').textContent = state.rpe;
-        };
-    }
-
     // Notes
     overlay.querySelector('#wkSet_notes').oninput = (e) => { state.notes = e.target.value; };
 
@@ -332,7 +313,6 @@ window.wkOpenSetModal = function(sessionExerciseId, setIndex) {
         record.distance     = state.distance;
         record.distanceUnit = state.distanceUnit;
         record.type         = state.type;
-        record.rpe          = settings.enableRPE ? state.rpe : null;
         record.notes        = state.notes;
         record.units        = units;
         record.completedAt  = new Date().toISOString();
@@ -476,6 +456,10 @@ async function addExerciseToSession(libEx, blockId = null) {
         blockId = '_added';
     }
 
+    const ttRaw = libEx.trackingType || 'Weight + Reps';
+    const ttNorm = window.wkTodayHelpers.normalizeTT(ttRaw);
+    const defTimerMode = (ttNorm === 'time' || ttNorm === 'weight_time') ? 'fixed_time' : 'none';
+    const defTimerSec  = (ttNorm === 'time' || ttNorm === 'weight_time') ? 30 : 0;
     const newEx = {
         id: 'sex_' + Date.now().toString(36) + '_' + Math.random().toString(36).slice(2,5),
         blockId,
@@ -483,12 +467,14 @@ async function addExerciseToSession(libEx, blockId = null) {
         exerciseName: libEx.name,
         exerciseNameSnapshot: libEx.name,
         color: libEx.color || window.EXERCISE_PALETTE[session.exercises ? session.exercises.length % window.EXERCISE_PALETTE.length : 0] || '#FF3B30',
-        trackingTypeSnapshot: libEx.trackingType || 'Weight + Reps',
+        trackingTypeSnapshot: ttRaw,
         targetSets: 3,
         repMin: 8, repMax: 12,
         restSeconds: 90,
         targetWeight: null, targetRPE: null, tempo: null, notes: null,
         progressionRule: 'none',
+        setTimerMode: defTimerMode,
+        setTimeSec: defTimerSec,
         sets: []
     };
     session.exercises = session.exercises || [];

@@ -1892,25 +1892,46 @@ async function rtDoStartRoutine(r) {
             order: b.order,
             restAfterBlockSeconds: Number(b.restAfterBlockSeconds) || 0,
         })),
-        exercises: rItems.map(item => ({
-            id: uid(),
-            blockId: item.blockId,
-            exerciseId:             item.exerciseId,
-            exerciseName:           item.exerciseNameSnapshot || exName(item.exerciseId),
-            exerciseNameSnapshot:   item.exerciseNameSnapshot || exName(item.exerciseId),
-            color:                  item.color || window.EXERCISE_PALETTE[0] || '#FF3B30',
-            trackingTypeSnapshot:   item.trackingTypeSnapshot || 'Weight + Reps',
-            targetSets:             Number(item.targetSets) || 3,
-            repMin:                 item.repMin,
-            repMax:                 item.repMax,
-            restSeconds:            Number(item.restSeconds) || 90,
-            targetWeight:           item.targetWeight || null,
-            targetRPE:              item.targetRPE    || null,
-            tempo:                  item.tempo        || null,
-            notes:                  item.notes        || null,
-            progressionRule:        item.progressionRule || 'none',
-            sets: []
-        })),
+        exercises: rItems.map(item => {
+            const ttSnap = item.trackingTypeSnapshot || 'Weight + Reps';
+            const ttNorm = (function(raw){
+                const s = String(raw||'').toLowerCase();
+                if (s.includes('assist')) return 'assisted_weight_reps';
+                if (s.includes('body'))   return 'bodyweight_reps';
+                if (s.includes('distance')) return 'distance_time';
+                if (s === 'weight_time' || (s.includes('weight') && s.includes('time'))) return 'weight_time';
+                if (s === 'time' || (s.includes('time') && !s.includes('reps'))) return 'time';
+                return 'weight_reps';
+            })(ttSnap);
+            // Default per-tracking-type timer config so the runner knows what to do
+            const defTimerMode = (ttNorm === 'time' || ttNorm === 'weight_time')
+                ? 'fixed_time'
+                : 'none';
+            const defTimerSec = (ttNorm === 'time')
+                ? (Number(item.repMax || item.repMin) || 30)
+                : (ttNorm === 'weight_time' ? 30 : 0);
+            return {
+                id: uid(),
+                blockId: item.blockId,
+                exerciseId:             item.exerciseId,
+                exerciseName:           item.exerciseNameSnapshot || exName(item.exerciseId),
+                exerciseNameSnapshot:   item.exerciseNameSnapshot || exName(item.exerciseId),
+                color:                  item.color || window.EXERCISE_PALETTE[0] || '#FF3B30',
+                trackingTypeSnapshot:   ttSnap,
+                targetSets:             Number(item.targetSets) || 3,
+                repMin:                 item.repMin,
+                repMax:                 item.repMax,
+                restSeconds:            Number(item.restSeconds) || 90,
+                targetWeight:           item.targetWeight || null,
+                targetRPE:              item.targetRPE    || null,
+                tempo:                  item.tempo        || null,
+                notes:                  item.notes        || null,
+                progressionRule:        item.progressionRule || 'none',
+                setTimerMode:           item.setTimerMode || defTimerMode,
+                setTimeSec:             Number(item.setTimeSec) || defTimerSec,
+                sets: []
+            };
+        }),
         notes: ''
     };
 

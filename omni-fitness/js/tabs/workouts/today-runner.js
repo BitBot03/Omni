@@ -1,75 +1,99 @@
 /* ─────────────────────────────────────────────────────────────
    TODAY · WORKOUT RUNNER (step queue + HUD engine)
-   Builds a flattened step queue from the active session and
-   drives the dual-ring HUD, auto-advances rest timers, and
-   integrates with existing set-log modals.
+   Single source of truth for the live workout player.
 
-   Public API (via window.wkRunner):
-     new WkRunner(session) → instance
-     .start()        → begin timing current step
-     .pause()        → pause
-     .togglePlay()   → start or pause
-     .next()         → skip to next step
-     .prev()         → go back one step
-     .skipRest()     → end rest immediately (only during REST)
-     .logCurrent()   → open wkOpenSetModal for current SET step
-     .attachDOM()    → (re)connect to DOM after re-render
-     .destroy()      → cleanup, remove listeners
+   Phases:
+     IDLE         – session not started yet
+     WORK_TIMED   – timed work step (timer counting down)
+     WORK_MANUAL  – manual work step (stopwatch counting up)
+     RESTING      – rest interval (timer counting down)
+     AWAIT_LOG    – timed work finished, waiting for user to log set
+     PAUSED       – any phase paused by user
+     COMPLETE     – queue exhausted
 
-   Events emitted on document:
-     'wkRunnerTick'  → every rAF frame while running
+   Public API (window.wkRunner):
+     .start(), .pause(), .togglePlay()
+     .next()        – context-aware ⏩
+     .prev()        – step back one
+     .skipRest()    – end rest immediately
+     .logCurrent()  – open the set-log modal for current SET
+     .attachDOM(), .destroy()
    ───────────────────────────────────────────────────────────── */
+
+const WK_PHASE = {
+    IDLE:        'idle',
+    WORK_TIMED:  'work_timed',
+    WORK_MANUAL: 'work_manual',
+    RESTING:     'resting',
+    AWAIT_LOG:   'await_log',
+    PAUSED:      'paused',
+    COMPLETE:    'complete'
+};
 
 class WkRunner {
     constructor(session) {
         this.session      = session;
         this.sessionStart = session.startedAt ? new Date(session.startedAt).getTime() : Date.now();
         this.steps        = this._buildQueue(session);
+
+        // State machine
+        this.phase        = WK_PHASE.IDLE;
+        this.prevPhase    = WK_PHASE.IDLE; // remember pre-pause phase
         this.currentIndex = 0;
-        this.isRunning    = false;
-        this.isPaused     = false;
-        this.endAt        = 0;
-        this.stepStartAt  = Date.now();
+        this.endAt        = 0;             // ms when current timed step ends
+        this.stepStartAt  = Date.now();    // ms when current step started
+        this.pauseRemain  = 0;             // remaining sec when paused (timed steps)
+        this.skippedSteps = new Set();
+
         this._rafId       = null;
         this._tickBound   = this._tick.bind(this);
         this._onChanged   = this._onChanged.bind(this);
-        this.skippedSteps = new Set(); // indices of SET steps skipped without logging
+
+        // Resume from persisted runner state
+        this._restoreFromSession();
+
         document.addEventListener('workoutsChanged', this._onChanged);
     }
 
-    /* ── Step queue builder ───────────────────────────────── */
+    /* ════════ STEP QUEUE BUILDER ════════════════════════════ */
     _buildQueue(session) {
-        const steps    = [];
-        const defRest  = 90;
-        const exercises= session.exercises || [];
-        const blocks   = (session.blocks || []).slice().sort((a,b) => (a.order||0)-(b.order||0));
+        const steps     = [];
+        const defRest   = 90;
+        const exercises = session.exercises || [];
+        const blocks    = (session.blocks || []).slice().sort((a,b) => (a.order||0)-(b.order||0));
+
+        const makeSetStep = (ex, i, totalSets, block, type) => {
+            const tt = this._normTT(ex.trackingTypeSnapshot || ex.trackingType);
+            const isTimed = this._isTimedTracking(tt, ex);
+            const timerSec = isTimed ? this._resolveTimerSec(tt, ex) : 0;
+            return {
+                type: 'SET',
+                exId: ex.id,
+                exName: ex.exerciseName || ex.exerciseNameSnapshot || 'Exercise',
+                color: ex.color || (window.EXERCISE_PALETTE && window.EXERCISE_PALETTE[0]) || '#FF3B30',
+                setIndex: i,
+                totalSets,
+                blockId: block.id,
+                blockName: block.name || 'Block',
+                blockType: type,
+                trackingType: tt,
+                isTimed,
+                timerSec,
+                repMin: ex.repMin || 0,
+                repMax: ex.repMax || 0,
+                tempo: ex.tempo || null
+            };
+        };
 
         const processBlock = (block, exs) => {
             const type = (block.type || 'normal').toLowerCase();
             const isGroup = (type === 'superset' || type === 'giant' || type === 'circuit');
 
             if (!isGroup) {
-                // Standard: linear set order per exercise
                 for (const ex of exs) {
                     const totalSets = Number(ex.targetSets) || 3;
-                    const tt = this._normTT(ex.trackingTypeSnapshot || ex.trackingType);
-                    const timerSec = tt === 'time' ? (Number(ex.setTimeSec) || 0) : 0;
                     for (let i = 1; i <= totalSets; i++) {
-                        steps.push({
-                            type: 'SET',
-                            exId: ex.id,
-                            exName: ex.exerciseName || ex.exerciseNameSnapshot || 'Exercise',
-                            color: ex.color || (window.EXERCISE_PALETTE && window.EXERCISE_PALETTE[0]) || '#FF3B30',
-                            setIndex: i,
-                            totalSets,
-                            blockId: block.id,
-                            blockName: block.name || 'Block',
-                            blockType: type,
-                            trackingType: tt,
-                            timerSec,
-                            repMin: ex.repMin || 0,
-                            repMax: ex.repMax || 0,
-                        });
+                        steps.push(makeSetStep(ex, i, totalSets, block, type));
                         if (i < totalSets) {
                             const rest = Number(ex.restSeconds) || defRest;
                             steps.push({ type:'REST', durationSec: rest, label: `Rest · ${ex.exerciseName || 'Next set'}`, color: window.REST_COLOR || '#00FFC4' });
@@ -77,29 +101,13 @@ class WkRunner {
                     }
                 }
             } else {
-                // Superset/Giant/Circuit: round-based
+                // Round-based for superset/giant/circuit
                 const maxRounds = Math.max(...exs.map(e => Number(e.targetSets)||3), 1);
                 const blockRest = Number(block.restAfterBlockSeconds) || defRest;
                 for (let round = 1; round <= maxRounds; round++) {
                     const roundExs = exs.filter(e => round <= (Number(e.targetSets)||3));
                     for (const ex of roundExs) {
-                        const tt = this._normTT(ex.trackingTypeSnapshot || ex.trackingType);
-                        const timerSec = tt === 'time' ? (Number(ex.setTimeSec) || 0) : 0;
-                        steps.push({
-                            type: 'SET',
-                            exId: ex.id,
-                            exName: ex.exerciseName || ex.exerciseNameSnapshot || 'Exercise',
-                            color: ex.color || (window.EXERCISE_PALETTE && window.EXERCISE_PALETTE[0]) || '#FF3B30',
-                            setIndex: round,
-                            totalSets: Number(ex.targetSets)||3,
-                            blockId: block.id,
-                            blockName: block.name || 'Block',
-                            blockType: type,
-                            trackingType: tt,
-                            timerSec,
-                            repMin: ex.repMin || 0,
-                            repMax: ex.repMax || 0,
-                        });
+                        steps.push(makeSetStep(ex, round, Number(ex.targetSets)||3, block, type));
                     }
                     if (round < maxRounds && blockRest > 0) {
                         steps.push({ type:'REST', durationSec: blockRest, label: `${block.name||'Round'} · round ${round} rest`, color: window.REST_COLOR || '#00FFC4' });
@@ -127,43 +135,232 @@ class WkRunner {
         if (s.includes('assist')) return 'assisted_weight_reps';
         if (s.includes('body'))   return 'bodyweight_reps';
         if (s.includes('distance')) return 'distance_time';
+        if (s === 'weight_time' || (s.includes('weight') && s.includes('time'))) return 'weight_time';
         if (s === 'time' || (s.includes('time') && !s.includes('reps'))) return 'time';
         return 'weight_reps';
     }
 
-    /* ── Playback controls ───────────────────────────────── */
-    start() {
-        if (this.isRunning && !this.isPaused) return;
-        this.isRunning = true;
-        this.isPaused  = false;
+    /* True if this set step should run a countdown timer */
+    _isTimedTracking(tt, ex) {
+        // Explicit per-exercise timer mode wins
+        const mode = String(ex.setTimerMode || '').toLowerCase();
+        if (mode === 'fixed_time' || mode === 'rep_pace') return true;
+        if (mode === 'manual' || mode === 'none') return false;
+        // Implicit by tracking type
+        return tt === 'time' || tt === 'weight_time' || tt === 'distance_time';
+    }
+
+    /* Resolve fixed timer duration in seconds for a SET step */
+    _resolveTimerSec(tt, ex) {
+        const explicit = Number(ex.setTimeSec);
+        if (explicit > 0) return explicit;
+        // For 'time' tracking, repMin/repMax are interpreted as seconds
+        if (tt === 'time') {
+            const v = Number(ex.repMax || ex.repMin) || 0;
+            if (v > 0) return v;
+        }
+        // rep_pace: use tempo (sum of digits) × repMax
+        const mode = String(ex.setTimerMode || '').toLowerCase();
+        if (mode === 'rep_pace' && ex.tempo) {
+            const t = String(ex.tempo).split(/[^0-9.]/).filter(Boolean).map(Number);
+            const perRep = t.reduce((s,n) => s + (Number(n)||0), 0);
+            const reps = Number(ex.repMax || ex.repMin) || 8;
+            if (perRep > 0) return Math.round(perRep * reps);
+        }
+        // Reasonable default for distance_time / weight_time without explicit timer
+        if (tt === 'weight_time' || tt === 'distance_time') return 30;
+        return 0;
+    }
+
+    /* ════════ PROPERTIES ════════════════════════════════════ */
+    get currentStep() { return this.steps[this.currentIndex] || null; }
+    get totalSteps()  { return this.steps.length; }
+
+    get isRunning() {
+        return this.phase !== WK_PHASE.IDLE
+            && this.phase !== WK_PHASE.PAUSED
+            && this.phase !== WK_PHASE.COMPLETE;
+    }
+    get isPaused() { return this.phase === WK_PHASE.PAUSED; }
+
+    /* Map internal phase to data-phase used by CSS theme */
+    get cssPhase() {
+        switch (this.phase) {
+            case WK_PHASE.IDLE:        return 'idle';
+            case WK_PHASE.RESTING:     return 'rest';
+            case WK_PHASE.PAUSED:      return 'paused';
+            case WK_PHASE.COMPLETE:    return 'complete';
+            case WK_PHASE.AWAIT_LOG:   return 'work';   // styled like work, with AWAIT badge
+            default:                   return 'work';
+        }
+    }
+
+    /* ════════ TIMING / DURATION HELPERS ═════════════════════ */
+    /* Estimated duration of any step (sec). Manual sets get a default 45s estimate. */
+    _stepEstSec(step) {
+        if (!step) return 0;
+        if (step.type === 'REST') return Number(step.durationSec) || 0;
+        if (step.timerSec > 0)    return step.timerSec;
+        return 45; // manual set estimate
+    }
+
+    /* Real countdown duration for a step (0 means open-ended / manual) */
+    _stepCountdownSec(step) {
+        if (!step) return 0;
+        if (step.type === 'REST') return Number(step.durationSec) || 0;
+        if (step.type === 'SET' && step.timerSec > 0) return step.timerSec;
+        return 0;
+    }
+
+    /* Whether outer ring should be sized by time vs equal steps */
+    get useTimeMode() {
+        if (!this.steps.length) return false;
+        const known = this.steps.filter(s => this._stepEstSec(s) > 0).length;
+        return (known / this.steps.length) >= 0.6;
+    }
+
+    /* Total estimated session seconds (for outer ring time mode + time-left) */
+    get totalEstimatedSec() {
+        return this.steps.reduce((sum, s) => sum + this._stepEstSec(s), 0);
+    }
+
+    /* Sum of step est durations BEFORE current index */
+    _completedEstSec() {
+        let s = 0;
+        for (let i = 0; i < Math.min(this.currentIndex, this.steps.length); i++) {
+            s += this._stepEstSec(this.steps[i]);
+        }
+        return s;
+    }
+
+    /* Fraction of CURRENT step completed (0..1) */
+    _currentStepFrac() {
+        const step = this.currentStep;
+        if (!step) return 0;
+        if (this.phase === WK_PHASE.COMPLETE) return 1;
+
+        const cd = this._stepCountdownSec(step);
+        const now = Date.now();
+        if (cd > 0) {
+            // Timed (REST or WORK_TIMED) — fill as time elapses
+            if (this.phase === WK_PHASE.AWAIT_LOG) return 1;
+            if (this.phase === WK_PHASE.PAUSED) {
+                const used = cd - this.pauseRemain;
+                return Math.max(0, Math.min(1, used / cd));
+            }
+            if (this.endAt > 0) {
+                const rem = Math.max(0, (this.endAt - now) / 1000);
+                return Math.max(0, Math.min(1, 1 - rem / cd));
+            }
+            return 0;
+        }
+        // Manual SET: visualize against estimate, capped
+        if (step.type === 'SET' && this.phase === WK_PHASE.AWAIT_LOG) return 1;
+        const elapsed = (now - this.stepStartAt) / 1000;
+        const est = this._stepEstSec(step);
+        return Math.max(0, Math.min(0.98, est > 0 ? elapsed / est : 0));
+    }
+
+    /* Outer-ring overall fraction (0..1) including partial current step */
+    get overallFraction() {
+        if (!this.totalSteps) return 0;
+        if (this.phase === WK_PHASE.COMPLETE) return 1;
+
+        if (this.useTimeMode) {
+            const total = this.totalEstimatedSec;
+            if (total <= 0) return 0;
+            const partial = this._currentStepFrac() * this._stepEstSec(this.currentStep);
+            return Math.min(1, (this._completedEstSec() + partial) / total);
+        }
+        // Step mode: each step is equal weight
+        return Math.min(1, (this.currentIndex + this._currentStepFrac()) / this.totalSteps);
+    }
+
+    /* Estimated seconds remaining in the session */
+    get estimatedRemainingSec() {
+        if (this.phase === WK_PHASE.COMPLETE) return 0;
+        let rem = 0;
+        for (let i = this.currentIndex + 1; i < this.steps.length; i++) {
+            rem += this._stepEstSec(this.steps[i]);
+        }
+        // current step remaining
         const step = this.currentStep;
         if (step) {
-            const dur = this._stepDuration(step);
-            if (dur > 0) {
-                this.endAt = Date.now() + dur * 1000;
+            const cd = this._stepCountdownSec(step);
+            if (cd > 0) {
+                if (this.phase === WK_PHASE.PAUSED) rem += this.pauseRemain;
+                else if (this.endAt > 0) rem += Math.max(0, (this.endAt - Date.now()) / 1000);
+                else rem += cd;
+            } else {
+                rem += this._stepEstSec(step) * (1 - this._currentStepFrac());
             }
         }
-        this.stepStartAt = Date.now();
+        return Math.max(0, Math.round(rem));
+    }
+
+    /* ════════ PLAYBACK CONTROLS ═════════════════════════════ */
+    start() {
+        if (!this.totalSteps) return;
+        if (this.phase === WK_PHASE.COMPLETE) return;
+
+        // Resume from pause: restore prevPhase + endAt
+        if (this.phase === WK_PHASE.PAUSED) {
+            this.phase = this.prevPhase || this._phaseForCurrentStep();
+            const cd = this._stepCountdownSec(this.currentStep);
+            if (cd > 0 && this.pauseRemain > 0) {
+                this.endAt = Date.now() + this.pauseRemain * 1000;
+            }
+            this.pauseRemain = 0;
+        } else {
+            // Fresh start of current step
+            this.phase = this._phaseForCurrentStep();
+            this.stepStartAt = Date.now();
+            const cd = this._stepCountdownSec(this.currentStep);
+            this.endAt = cd > 0 ? Date.now() + cd * 1000 : 0;
+        }
+
         if (!this._rafId) this._rafId = requestAnimationFrame(this._tickBound);
+        this._persistRunnerState();
         this.updateHUD();
     }
 
     pause() {
-        if (!this.isRunning) return;
-        this.isPaused = true;
+        if (this.phase === WK_PHASE.PAUSED || this.phase === WK_PHASE.IDLE
+            || this.phase === WK_PHASE.COMPLETE) return;
+        this.prevPhase = this.phase;
+        const cd = this._stepCountdownSec(this.currentStep);
+        if (cd > 0 && this.endAt > 0) {
+            this.pauseRemain = Math.max(0, (this.endAt - Date.now()) / 1000);
+        }
+        this.phase = WK_PHASE.PAUSED;
         if (this._rafId) { cancelAnimationFrame(this._rafId); this._rafId = null; }
+        this._persistRunnerState();
         this.updateHUD();
     }
 
     togglePlay() {
-        if (!this.isRunning || this.isPaused) this.start();
-        else this.pause();
+        if (this.isRunning) this.pause();
+        else this.start();
     }
 
+    /* Context-aware ⏩  next button */
     next() {
         const step = this.currentStep;
-        if (step && step.type === 'SET') {
-            // Mark as skipped if not yet logged
+        if (!step) return;
+
+        // During WORK steps: prefer opening the log modal
+        if (step.type === 'SET'
+            && (this.phase === WK_PHASE.WORK_TIMED
+                || this.phase === WK_PHASE.WORK_MANUAL
+                || this.phase === WK_PHASE.IDLE
+                || this.phase === WK_PHASE.PAUSED)) {
+            this.logCurrent();
+            return;
+        }
+
+        // AWAIT_LOG / RESTING / COMPLETE: skip forward
+        if (step.type === 'SET' && this.phase === WK_PHASE.AWAIT_LOG) {
+            // Mark as skipped if not logged
             const session = window.wkState && window.wkState.activeSession;
             const ex = session && (session.exercises||[]).find(e => e.id === step.exId);
             const isLogged = ex && (ex.sets||[]).some(s => s.setIndex === step.setIndex);
@@ -177,8 +374,12 @@ class WkRunner {
         if (this.currentIndex <= 0) return;
         this.currentIndex--;
         this.stepStartAt = Date.now();
-        const dur = this._stepDuration(this.currentStep);
-        this.endAt = dur > 0 ? Date.now() + dur * 1000 : 0;
+        this.phase = this._phaseForCurrentStep();
+        const cd = this._stepCountdownSec(this.currentStep);
+        this.endAt = cd > 0 ? Date.now() + cd * 1000 : 0;
+        this.pauseRemain = 0;
+        if (this.isRunning && !this._rafId) this._rafId = requestAnimationFrame(this._tickBound);
+        this._persistRunnerState();
         this.updateHUD();
     }
 
@@ -197,101 +398,100 @@ class WkRunner {
     }
 
     stop() {
-        this.isRunning = false;
-        this.isPaused  = false;
         if (this._rafId) { cancelAnimationFrame(this._rafId); this._rafId = null; }
     }
 
     destroy() {
         this.stop();
         document.removeEventListener('workoutsChanged', this._onChanged);
+        if (this._hudObserver) { this._hudObserver.disconnect(); this._hudObserver = null; }
     }
 
-    /* ── Properties ──────────────────────────────────────── */
-    get currentStep() { return this.steps[this.currentIndex] || null; }
-    get totalSteps()  { return this.steps.length; }
-
-    get overallFraction() {
-        if (!this.totalSteps) return 0;
-        return Math.min(1, this.currentIndex / this.totalSteps);
-    }
-
-    get totalEstimatedSec() {
-        return this.steps.reduce((s, step) => {
-            if (step.type === 'REST') return s + step.durationSec;
-            if (step.type === 'SET' && step.timerSec > 0) return s + step.timerSec;
-            return s + 45; // estimate 45s per manual set
-        }, 0);
-    }
-
-    /* ── Internals ───────────────────────────────────────── */
-    _stepDuration(step) {
-        if (!step) return 0;
-        if (step.type === 'REST') return step.durationSec || 0;
-        if (step.type === 'SET' && step.timerSec > 0) return step.timerSec;
-        return 0; // manual set: no fixed duration
+    /* ════════ INTERNALS ═════════════════════════════════════ */
+    _phaseForCurrentStep() {
+        const step = this.currentStep;
+        if (!step) return this.totalSteps > 0 ? WK_PHASE.COMPLETE : WK_PHASE.IDLE;
+        if (step.type === 'REST') return WK_PHASE.RESTING;
+        return step.timerSec > 0 ? WK_PHASE.WORK_TIMED : WK_PHASE.WORK_MANUAL;
     }
 
     _tick() {
-        if (!this.isRunning || this.isPaused) { this._rafId = null; return; }
+        if (!this.isRunning) { this._rafId = null; return; }
         const step = this.currentStep;
         if (step) {
-            const dur = this._stepDuration(step);
-            if (dur > 0 && this.endAt > 0) {
-                const remaining = Math.max(0, (this.endAt - Date.now()) / 1000);
-                if (remaining <= 0) {
-                    this._onStepComplete(step);
-                    return;
-                }
+            const cd = this._stepCountdownSec(step);
+            if (cd > 0 && this.endAt > 0) {
+                const rem = (this.endAt - Date.now()) / 1000;
+                if (rem <= 0) { this._onCountdownDone(step); return; }
             }
         }
         this.updateHUD();
         this._rafId = requestAnimationFrame(this._tickBound);
     }
 
-    _onStepComplete(step) {
+    _onCountdownDone(step) {
         if (step.type === 'REST') {
             this._vibrate([100, 60, 180]);
             this._beep(660, 0.06, 0.15);
             if (typeof toast === 'function') toast('Rest done — go!');
             this._advance();
-        } else if (step.type === 'SET') {
-            // Timed set complete
-            this._vibrate([120]);
-            this._beep(880, 0.06, 0.12);
-            if (typeof toast === 'function') toast(`Set timer done — log it!`);
-            // Pause runner, let user log
-            this.isPaused = true;
-            this._rafId = null;
-            this.updateHUD();
+            return;
         }
+        // SET: timed work finished → AWAIT_LOG
+        this._vibrate([120]);
+        this._beep(880, 0.06, 0.12);
+        if (typeof toast === 'function') toast('Set timer done — log it!');
+        this.phase = WK_PHASE.AWAIT_LOG;
+        this.endAt = 0;
+        if (this._rafId) { cancelAnimationFrame(this._rafId); this._rafId = null; }
+        this._persistRunnerState();
+        this.updateHUD();
+        // If user enabled auto-rest, opening modal save will trigger _syncStepsToLogs which advances
     }
 
     _advance() {
         if (this.currentIndex >= this.totalSteps - 1) {
-            // Reached end
-            this.currentIndex = Math.min(this.currentIndex + 1, this.totalSteps);
-            this.isRunning = false;
-            this.isPaused  = false;
+            this.currentIndex = this.totalSteps;
+            this.phase = WK_PHASE.COMPLETE;
+            this.endAt = 0;
             if (this._rafId) { cancelAnimationFrame(this._rafId); this._rafId = null; }
+            this._persistRunnerState();
             this.updateHUD();
             if (typeof toast === 'function') toast('All planned sets done! Great work 💪');
             return;
         }
+        const wasRunning = this.isRunning;
         this.currentIndex++;
         this.stepStartAt = Date.now();
+        this.pauseRemain = 0;
+        this.phase = wasRunning ? this._phaseForCurrentStep() : WK_PHASE.PAUSED;
+
         const step = this.currentStep;
-        const dur  = this._stepDuration(step);
-        this.endAt = (dur > 0 && this.isRunning && !this.isPaused)
-            ? Date.now() + dur * 1000 : 0;
-        this.updateHUD();
-        if (this.isRunning && !this.isPaused && this._rafId === null) {
-            this._rafId = requestAnimationFrame(this._tickBound);
+        const cd = this._stepCountdownSec(step);
+        if (wasRunning) {
+            this.endAt = cd > 0 ? Date.now() + cd * 1000 : 0;
+            if (!this._rafId) this._rafId = requestAnimationFrame(this._tickBound);
+        } else {
+            this.prevPhase = this._phaseForCurrentStep();
+            if (cd > 0) this.pauseRemain = cd;
+            this.endAt = 0;
         }
+        this._persistRunnerState();
+        this.updateHUD();
     }
 
     _onChanged(e) {
         const reason = e && e.detail && e.detail.reason;
+        if (reason === 'exerciseAdded' || reason === 'exerciseRemoved') {
+            // Rebuild queue, keep cursor as best we can
+            const oldIdx = this.currentIndex;
+            this.steps = this._buildQueue(this.session);
+            this.currentIndex = Math.min(oldIdx, Math.max(0, this.steps.length - 1));
+            this._renderOuterSegments();
+            this._persistRunnerState();
+            this.updateHUD();
+            return;
+        }
         if (reason !== 'setLogged' && reason !== 'setUpdated') return;
         this._syncStepsToLogs();
         this._updateLoggerSync();
@@ -299,36 +499,82 @@ class WkRunner {
     }
 
     _syncStepsToLogs() {
-        // Advance past any SET steps that now have a logged set
         const session = window.wkState && window.wkState.activeSession;
         if (!session) return;
-        // Check if current step is already logged
         const step = this.currentStep;
         if (!step || step.type !== 'SET') return;
         const ex = (session.exercises||[]).find(e => e.id === step.exId);
         if (!ex) return;
         const hasLogged = (ex.sets||[]).some(s => s.setIndex === step.setIndex);
-        if (hasLogged) {
-            // Move to next step and start rest if running
-            const wasRunning = this.isRunning && !this.isPaused;
-            this._advance();
-            if (!wasRunning && this.isRunning) {
-                // Auto-start rest if autoRestTimer enabled
-                if (window.wkSettings && window.wkSettings.get().autoRestTimer) {
-                    this.start();
-                }
-            }
+        if (!hasLogged) return;
+
+        // From AWAIT_LOG or WORK_*, advance to next step (likely REST).
+        // If autoRestTimer is on and we were running, keep running through rest.
+        const wasRunningBefore = this.phase !== WK_PHASE.PAUSED && this.phase !== WK_PHASE.IDLE;
+        const auto = window.wkSettings && window.wkSettings.get().autoRestTimer;
+
+        // Advance, then auto-start the new step if appropriate
+        this._advance();
+        if (auto && wasRunningBefore && !this.isRunning && this.phase !== WK_PHASE.COMPLETE) {
+            this.start();
         }
     }
 
-    /* ── Logger sync: mark rows done/skipped in real-time ── */
+    /* ════════ RUNNER STATE PERSISTENCE ═════════════════════ */
+    _persistRunnerState() {
+        const session = this.session;
+        if (!session) return;
+        session._runner = {
+            currentIndex: this.currentIndex,
+            phase: this.phase,
+            prevPhase: this.prevPhase,
+            endAt: this.endAt,
+            stepStartAt: this.stepStartAt,
+            pauseRemain: this.pauseRemain,
+            skipped: Array.from(this.skippedSteps),
+            savedAt: Date.now()
+        };
+        if (window.wkTodayHelpers && window.wkTodayHelpers.persistSession) {
+            // Fire-and-forget
+            window.wkTodayHelpers.persistSession(session).catch(()=>{});
+        }
+    }
+
+    _restoreFromSession() {
+        const r = this.session && this.session._runner;
+        if (!r) return;
+        this.currentIndex = Math.min(Math.max(0, Number(r.currentIndex) || 0), this.totalSteps);
+        this.skippedSteps = new Set(Array.isArray(r.skipped) ? r.skipped : []);
+        this.prevPhase    = r.prevPhase || WK_PHASE.IDLE;
+        this.stepStartAt  = Number(r.stepStartAt) || Date.now();
+        this.pauseRemain  = Number(r.pauseRemain) || 0;
+
+        const phase = r.phase || WK_PHASE.IDLE;
+        // If session was running when persisted, come back PAUSED so user explicitly resumes.
+        if (phase === WK_PHASE.WORK_TIMED || phase === WK_PHASE.WORK_MANUAL || phase === WK_PHASE.RESTING) {
+            this.prevPhase = phase;
+            this.phase = WK_PHASE.PAUSED;
+            // If endAt was in future when paused, derive remaining
+            if (r.endAt && r.endAt > r.savedAt) {
+                this.pauseRemain = Math.max(0, (r.endAt - r.savedAt) / 1000);
+            } else {
+                const cd = this._stepCountdownSec(this.currentStep);
+                this.pauseRemain = this.pauseRemain || cd;
+            }
+            this.endAt = 0;
+        } else {
+            this.phase = phase;
+            this.endAt = 0; // never restore endAt across reloads
+        }
+    }
+
+    /* ════════ LOGGER SYNC (table rows) ══════════════════════ */
     _updateLoggerSync() {
         const container = document.getElementById('wkTodayPlayer');
         if (!container) return;
         const session = window.wkState && window.wkState.activeSession;
         if (!session) return;
 
-        // Build quick lookup of logged sets: "exId:setIndex" → true
         const loggedMap = new Map();
         for (const ex of (session.exercises||[])) {
             for (const s of (ex.sets||[])) {
@@ -336,21 +582,24 @@ class WkRunner {
             }
         }
 
-        // Update each set row
         container.querySelectorAll('[data-exercise-id][data-set-index]').forEach(row => {
             const exId   = row.dataset.exerciseId;
             const setIdx = Number(row.dataset.setIndex);
             const isDone = loggedMap.has(`${exId}:${setIdx}`);
-            // Find step index to check skipped
             const stepIdx = this.steps.findIndex(
                 s => s.type === 'SET' && s.exId === exId && s.setIndex === setIdx
             );
             const isSkipped = !isDone && stepIdx >= 0 && this.skippedSteps.has(stepIdx);
+            const isCurrent = this.currentStep
+                && this.currentStep.type === 'SET'
+                && this.currentStep.exId === exId
+                && this.currentStep.setIndex === setIdx;
+
             row.classList.toggle('is-done', isDone);
             row.classList.toggle('is-skipped', isSkipped);
+            row.classList.toggle('wkt-current-set', !!isCurrent);
         });
 
-        // Mark exercise cards as complete when all sets logged
         container.querySelectorAll('[data-ex-id]').forEach(exEl => {
             const exId = exEl.dataset.exId;
             const ex = (session.exercises||[]).find(e => e.id === exId);
@@ -361,40 +610,42 @@ class WkRunner {
         });
     }
 
-    /* ── DOM attachment & HUD update ─────────────────────── */
+    /* ════════ DOM ATTACH + RENDER ═══════════════════════════ */
     attachDOM() {
-        // Called after every re-render to re-connect to new DOM nodes
         this._setupScrollObserver();
         this._renderOuterSegments();
         this.updateHUD();
+        this._updateLoggerSync();
+        // Resume rAF if we're already running
+        if (this.isRunning && !this._rafId) {
+            this._rafId = requestAnimationFrame(this._tickBound);
+        }
     }
 
     _renderOuterSegments() {
         const trackGroup = document.getElementById('wktOuterSegmentsTrack');
         const fillGroup = document.getElementById('wktOuterSegments');
         if (!trackGroup || !fillGroup) return;
+        if (!this.steps.length) { trackGroup.innerHTML = ''; fillGroup.innerHTML = ''; return; }
 
-        const totalSteps = this.steps.length;
-        if (totalSteps === 0) return;
+        const C_OUTER = 904.8; // 2π × 144
+        const useTime = this.useTimeMode;
+        const totalUnits = useTime ? this.totalEstimatedSec : this.steps.length;
+        const gapDeg = 1.5; // visual gap between segments
 
         let html = '';
-        let currentOffset = 0;
-        const C_OUTER = 904.8; // circumference
-
-        this.steps.forEach(step => {
-            const fraction = 1 / totalSteps;
-            const dashLength = fraction * C_OUTER;
-            
+        let offset = 0;
+        for (const step of this.steps) {
+            const units = useTime ? this._stepEstSec(step) : 1;
+            const dashLength = (units / totalUnits) * C_OUTER;
             const color = step.color || (step.type === 'REST' ? (window.REST_COLOR || '#00FFC4') : '#FF3B30');
-
-            html += `<circle cx="160" cy="160" r="144" fill="transparent" stroke="${color}" stroke-width="9" 
-                        stroke-dasharray="${Math.max(1, dashLength - 1.5)} ${C_OUTER}" 
-                        stroke-dashoffset="${-currentOffset}" />`;
-            currentOffset += dashLength;
-        });
-
+            html += `<circle cx="160" cy="160" r="144" fill="transparent" stroke="${color}" stroke-width="9"
+                stroke-dasharray="${Math.max(1, dashLength - gapDeg)} ${C_OUTER}"
+                stroke-dashoffset="${-offset}" />`;
+            offset += dashLength;
+        }
         trackGroup.innerHTML = html;
-        fillGroup.innerHTML = html;
+        fillGroup.innerHTML  = html;
     }
 
     _setupScrollObserver() {
@@ -408,183 +659,182 @@ class WkRunner {
         this._hudObserver.observe(hud);
     }
 
+    /* ════════ HUD UPDATE ════════════════════════════════════ */
     updateHUD() {
-        const step  = this.currentStep;
-        const now   = Date.now();
+        const step = this.currentStep;
+        const now = Date.now();
         const sessionElapsed = Math.floor((now - this.sessionStart) / 1000);
 
-        /* ── Inner ring ─────────────────────────────────── */
+        /* Inner ring fraction + countdown text */
         let innerFrac = 0;
-        let countdownSec = 0;
-        let isRest = false;
+        let countdownSec = 0; // positive = countdown, negative = stopwatch
         let stepLabel = '';
-        let stepSub   = '';
-        let playIcon  = (this.isRunning && !this.isPaused) 
-            ? '<svg width="24" height="24" viewBox="0 0 24 24" fill="currentColor"><path d="M6 19h4V5H6v14zm8-14v14h4V5h-4z"/></svg>' 
-            : '<svg width="24" height="24" viewBox="0 0 24 24" fill="currentColor"><path d="M8 5v14l11-7z"/></svg>';
+        let stepSub = '';
 
-        if (step) {
-            const dur = this._stepDuration(step);
+        const playIcon = this.isRunning
+            ? '<svg width="24" height="24" viewBox="0 0 24 24" fill="currentColor"><path d="M6 19h4V5H6v14zm8-14v14h4V5h-4z"/></svg>'
+            : (this.phase === WK_PHASE.COMPLETE
+                ? '<svg width="24" height="24" viewBox="0 0 24 24" fill="currentColor"><path d="M9 16.2L4.8 12l-1.4 1.4L9 19 21 7l-1.4-1.4L9 16.2z"/></svg>'
+                : '<svg width="24" height="24" viewBox="0 0 24 24" fill="currentColor"><path d="M8 5v14l11-7z"/></svg>');
+
+        if (this.phase === WK_PHASE.COMPLETE || (!step && this.totalSteps > 0 && this.currentIndex >= this.totalSteps)) {
+            stepLabel = 'Complete!';
+            stepSub   = 'All sets done';
+            innerFrac = 1;
+        } else if (!step) {
+            stepLabel = 'Ready';
+            stepSub   = 'Press ▶ to start';
+        } else {
+            const cd = this._stepCountdownSec(step);
             if (step.type === 'REST') {
-                isRest = true;
                 stepLabel = 'Rest';
                 stepSub   = step.label || 'Next set';
-                if (dur > 0 && this.endAt > 0 && this.isRunning && !this.isPaused) {
+                if (this.phase === WK_PHASE.PAUSED) {
+                    countdownSec = Math.ceil(this.pauseRemain || cd);
+                    innerFrac    = cd > 0 ? Math.max(0, Math.min(1, 1 - (this.pauseRemain || cd) / cd)) : 0;
+                } else if (this.phase === WK_PHASE.RESTING && cd > 0 && this.endAt > 0) {
                     const rem = Math.max(0, (this.endAt - now) / 1000);
-                    innerFrac   = 1 - (rem / dur); // fills as time passes
                     countdownSec = Math.ceil(rem);
-                } else if (dur > 0) {
-                    countdownSec = dur;
-                    innerFrac = 0;
+                    innerFrac    = 1 - rem / cd;
+                } else {
+                    countdownSec = cd;
+                    innerFrac    = 0;
                 }
-            } else { // SET
+            } else {
+                // SET
                 const repStr = step.repMin && step.repMax ? `${step.repMin}–${step.repMax} reps` : '';
                 stepLabel = step.exName;
                 stepSub   = `Set ${step.setIndex}/${step.totalSets}${repStr ? ' · ' + repStr : ''}`;
 
-                if (dur > 0 && this.isRunning && !this.isPaused && this.endAt > 0) {
-                    const rem = Math.max(0, (this.endAt - now) / 1000);
-                    innerFrac    = 1 - (rem / dur);
-                    countdownSec = Math.ceil(rem);
-                } else if (dur > 0) {
-                    countdownSec = dur;
-                    innerFrac = 0;
+                if (this.phase === WK_PHASE.AWAIT_LOG) {
+                    countdownSec = 0;
+                    innerFrac    = 1;
+                    stepSub      = `Tap “Log Set” · Set ${step.setIndex}/${step.totalSets}`;
+                } else if (cd > 0) {
+                    if (this.phase === WK_PHASE.PAUSED) {
+                        countdownSec = Math.ceil(this.pauseRemain || cd);
+                        innerFrac    = Math.max(0, Math.min(1, 1 - (this.pauseRemain || cd) / cd));
+                    } else if (this.phase === WK_PHASE.WORK_TIMED && this.endAt > 0) {
+                        const rem = Math.max(0, (this.endAt - now) / 1000);
+                        countdownSec = Math.ceil(rem);
+                        innerFrac    = 1 - rem / cd;
+                    } else {
+                        countdownSec = cd;
+                        innerFrac    = 0;
+                    }
                 } else {
-                    // Manual set: show stopwatch since stepStartAt
-                    const elapsed = Math.floor((now - this.stepStartAt) / 1000);
-                    innerFrac = Math.min(0.98, elapsed / 90); // visual arc, not depleting
-                    countdownSec = -elapsed; // negative = count-up
+                    // Manual stopwatch (counts up while running)
+                    if (this.phase === WK_PHASE.WORK_MANUAL) {
+                        const elapsed = Math.floor((now - this.stepStartAt) / 1000);
+                        countdownSec = -elapsed;
+                        innerFrac = Math.min(0.98, elapsed / 90);
+                    } else {
+                        countdownSec = 0;
+                        innerFrac = 0;
+                    }
                 }
             }
-        } else if (this.currentIndex >= this.totalSteps && this.totalSteps > 0) {
-            stepLabel = 'Complete!';
-            stepSub   = 'All sets done';
-            innerFrac = 1;
-            playIcon  = '<svg width="24" height="24" viewBox="0 0 24 24" fill="currentColor"><path d="M9 16.2L4.8 12l-1.4 1.4L9 19 21 7l-1.4-1.4L9 16.2z"/></svg>';
-        } else {
-            stepLabel = 'Ready';
-            stepSub   = 'Press ▶ to start';
         }
 
-        /* ── Outer ring: overall progress ─────────────────── */
         const outerFrac = this.overallFraction;
         const pctText   = `${Math.round(outerFrac * 100)}%`;
+        const timeLeftStr = this._fmtHms(this.estimatedRemainingSec);
 
-        /* ── Time left estimate ──────────────────────────── */
-        let timeLeftStr = '—';
-        const totalSec  = this.totalEstimatedSec;
-        if (totalSec > 0) {
-            const timeLeftSec = Math.max(0, totalSec - sessionElapsed);
-            timeLeftStr = this._fmt(timeLeftSec);
-        }
-
-        /* ── Update DOM ──────────────────────────────────── */
-        // SVG rings
-        const C_OUTER = 904.8; // 2π×144
-        const C_INNER = 703.7; // 2π×112
+        /* SVG rings */
+        const C_OUTER = 904.8, C_INNER = 703.7;
         this._setAttr('wktRingOuter', 'stroke-dashoffset', C_OUTER * (1 - outerFrac));
         this._setAttr('wktRingInner', 'stroke-dashoffset', C_INNER * (1 - innerFrac));
-        // Ring color class & inline theme
-        const ringInner = document.getElementById('wktRingInner');
-        if (ringInner) {
-            ringInner.classList.toggle('rest', isRest);
-        }
 
-        const els = [document.getElementById('wktHud'), document.getElementById('wktMiniHud')].filter(Boolean);
+        /* Theme color for HUD + mini */
+        const cssPhase = this.cssPhase;
         let hue = '#00d4ff';
-        if (this.currentIndex >= this.totalSteps && this.totalSteps > 0) {
-            hue = '#39ff14'; // complete green
-        } else if (!this.isRunning || this.isPaused) {
-            hue = '#b4becd'; // paused gray
-        } else if (step && step.color) {
-            hue = step.color;
-        } else if (isRest) {
-            hue = window.REST_COLOR || '#00FFC4';
-        }
+        if (cssPhase === 'complete') hue = '#39ff14';
+        else if (cssPhase === 'paused') hue = '#b4becd';
+        else if (cssPhase === 'rest') hue = window.REST_COLOR || '#00FFC4';
+        else if (step && step.color) hue = step.color;
 
         const r = parseInt(hue.slice(1, 3), 16) || 0;
         const g = parseInt(hue.slice(3, 5), 16) || 212;
         const b = parseInt(hue.slice(5, 7), 16) || 255;
 
-        els.forEach(hud => {
+        const huds = [document.getElementById('wktHud'), document.getElementById('wktMiniHud')].filter(Boolean);
+        huds.forEach(hud => {
             hud.style.setProperty('--ph-clr', hue);
             hud.style.setProperty('--ph-clr-rgb', `${r}, ${g}, ${b}`);
             hud.style.setProperty('--ph-glow', `rgba(${r},${g},${b},.52)`);
-            hud.style.setProperty('--ph-dim', `rgba(${r},${g},${b},.14)`);
+            hud.style.setProperty('--ph-dim',  `rgba(${r},${g},${b},.14)`);
             hud.style.setProperty('--ph-border', `rgba(${r},${g},${b},.28)`);
             hud.style.setProperty('--ph-text', hue);
             hud.style.setProperty('--out-clr', `rgba(${r},${g},${b},.65)`);
         });
 
-        // Center text
+        const hudEl = document.getElementById('wktHud');
+        if (hudEl && hudEl.dataset.phase !== cssPhase) hudEl.dataset.phase = cssPhase;
+
+        /* Center text */
         const timeDisplay = countdownSec < 0
-            ? this._fmtMs(-countdownSec) // stopwatch
-            : (step && this._stepDuration(step) > 0 ? this._fmtMs(countdownSec) : '');
+            ? this._fmtMs(-countdownSec)
+            : (countdownSec > 0 ? this._fmtMs(countdownSec) : (this.phase === WK_PHASE.AWAIT_LOG ? 'LOG' : ''));
 
         this._setText('wktRcName', stepLabel);
         this._setText('wktRcTime', timeDisplay);
-        this._setText('wktRcSub', stepSub);
+        this._setText('wktRcSub',  stepSub);
         this._setText('wktOuterPct', pctText);
 
-        // Top bar
+        /* Top bar */
         this._setText('wktTsElapsed', this._fmtHms(sessionElapsed));
         const setInfo = step && step.type === 'SET' ? `${step.setIndex}/${step.totalSets}` : '—';
         this._setText('wktTsSet', setInfo);
         this._setText('wktTsLeft', timeLeftStr);
 
-        // Stats col
+        /* Stats column */
         this._setText('wktStatElapsed', this._fmtHms(sessionElapsed));
         this._setText('wktStatLeft', timeLeftStr);
-        const setsDone = this._countLoggedSets();
-        this._setText('wktStatSets', String(setsDone));
+        this._setText('wktStatSets', String(this._countLoggedSets()));
         this._setText('wktStatPct', pctText);
 
-        // Play button
+        /* Play button */
         const playBtn = document.getElementById('wktBtnPlay');
         if (playBtn) playBtn.innerHTML = playIcon;
 
-        // Phase: set data-phase on HUD root for CSS variable switching
-        const hudEl = document.getElementById('wktHud');
-        if (hudEl) {
-            let phase = 'idle';
-            if (this.currentIndex >= this.totalSteps && this.totalSteps > 0) {
-                phase = 'complete';
-            } else if (this.isPaused) {
-                phase = 'paused';
-            } else if (this.isRunning && step && step.type === 'REST') {
-                phase = 'rest';
-            } else if (this.isRunning && step) {
-                phase = 'work';
-            }
-            if (hudEl.dataset.phase !== phase) hudEl.dataset.phase = phase;
-        }
-
-        // Phase badge text
+        /* Phase badge */
         const phaseBadgeEl = document.getElementById('wktPhaseBadge');
         if (phaseBadgeEl) {
-            const phaseMap = { work:'WORK', rest:'REST', paused:'PAUSED', idle:'READY', complete:'DONE' };
-            const ph = hudEl ? hudEl.dataset.phase : 'idle';
-            phaseBadgeEl.textContent = phaseMap[ph] || 'READY';
-            phaseBadgeEl.className = 'wkt-phase-badge wkt-phase-badge--' + (ph || 'idle');
+            const phaseTextMap = {
+                [WK_PHASE.IDLE]: 'READY',
+                [WK_PHASE.WORK_TIMED]: 'WORK',
+                [WK_PHASE.WORK_MANUAL]: 'WORK',
+                [WK_PHASE.RESTING]: 'REST',
+                [WK_PHASE.AWAIT_LOG]: 'AWAIT LOG',
+                [WK_PHASE.PAUSED]: 'PAUSED',
+                [WK_PHASE.COMPLETE]: 'DONE'
+            };
+            phaseBadgeEl.textContent = phaseTextMap[this.phase] || 'READY';
+            phaseBadgeEl.className = 'wkt-phase-badge wkt-phase-badge--' + cssPhase;
         }
 
-        // Skip rest button
+        /* Action buttons */
         const skipBtn = document.getElementById('wktBtnSkipRest');
         if (skipBtn) {
-            const canSkip = step && step.type === 'REST' && this.isRunning && !this.isPaused;
+            const canSkip = step && step.type === 'REST' && this.phase === WK_PHASE.RESTING;
             skipBtn.disabled = !canSkip;
             skipBtn.classList.toggle('active', canSkip);
         }
-
-        // Log button: highlight if current step is SET
         const logBtn = document.getElementById('wktBtnLog');
         if (logBtn) {
-            const isSet = step && step.type === 'SET';
+            const isSet = step && step.type === 'SET' && this.phase !== WK_PHASE.COMPLETE;
             logBtn.disabled = !isSet;
             logBtn.classList.toggle('active', isSet);
+            logBtn.textContent = (this.phase === WK_PHASE.AWAIT_LOG) ? 'Log Set →' : 'Log Set';
+        }
+        const nextBtn = document.getElementById('wktBtnNext');
+        if (nextBtn) {
+            const isSetWork = step && step.type === 'SET'
+                && (this.phase === WK_PHASE.WORK_TIMED || this.phase === WK_PHASE.WORK_MANUAL || this.phase === WK_PHASE.IDLE || this.phase === WK_PHASE.PAUSED);
+            nextBtn.title = isSetWork ? 'Log set' : 'Skip';
         }
 
-        // Next-up text (mobile)
+        /* Next-up text */
         const nextStep = this.steps[this.currentIndex + 1];
         let nextText = '';
         if (nextStep) {
@@ -595,11 +845,11 @@ class WkRunner {
         const nextupEl = document.getElementById('wktNextup');
         if (nextupEl) nextupEl.style.display = nextText ? '' : 'none';
 
-        // Queue list (desktop)
+        /* Queue */
         this._renderQueue();
 
-        // Mini HUD
-        this._updateMiniHud(stepLabel, timeDisplay, isRest, innerFrac, outerFrac, playIcon);
+        /* Mini HUD */
+        this._updateMiniHud(stepLabel, timeDisplay, cssPhase === 'rest', innerFrac, outerFrac, playIcon);
     }
 
     _renderQueue() {
@@ -618,8 +868,8 @@ class WkRunner {
             const name   = isRest ? `⏱ Rest · ${this._fmtMs(step.durationSec)}` :
                 `${step.exName} · Set ${step.setIndex}/${step.totalSets}`;
             return `<div class="wkt-queue-item ${isCurrent ? 'current' : ''} ${isPast ? 'past' : ''} ${isRest ? 'rest' : ''}">
-                <span class="wkt-qi-dot" style="background-color: ${color}; ${isCurrent ? `box-shadow: 0 0 7px ${color}80; border-color: ${color};` : 'border-color: ' + color + '80;'}"></span>
-                <span class="wkt-qi-text" style="${isCurrent ? `color: ${color}; font-weight: 700;` : ''}">${esc(name)}</span>
+                <span class="wkt-qi-dot" style="background-color: ${color}; ${isCurrent ? `box-shadow: 0 0 7px ${color}80;` : ''}"></span>
+                <span class="wkt-qi-text" style="${isCurrent ? `color: ${color}; font-weight: 800;` : ''}">${esc(name)}</span>
             </div>`;
         }).join('');
     }
@@ -627,9 +877,6 @@ class WkRunner {
     _updateMiniHud(label, time, isRest, innerFrac, outerFrac, playIcon) {
         const mini = document.getElementById('wktMiniHud');
         if (!mini) return;
-        const C = 100.5; // 2π×16
-        const innerOff = C * (1 - innerFrac);
-        const outerOff = C * (1 - outerFrac);
         mini.innerHTML = `
             <div class="wkt-mini-ring-wrap">
                 <svg viewBox="0 0 40 40" class="wkt-mini-svg">
@@ -650,13 +897,12 @@ class WkRunner {
             <button class="wkt-mini-play" onclick="window.wkRunner && window.wkRunner.togglePlay()">${playIcon}</button>`;
     }
 
-    /* ── Helpers ──────────────────────────────────────────── */
-    _fmt(s) {
+    /* ════════ FORMAT HELPERS ════════════════════════════════ */
+    _fmtMs(s) {
         s = Math.max(0, Math.round(s));
         const m = Math.floor(s / 60), sec = s % 60;
         return `${m}:${String(sec).padStart(2,'0')}`;
     }
-    _fmtMs(s) { return this._fmt(s); }
     _fmtHms(s) {
         s = Math.max(0, Math.round(s));
         const h = Math.floor(s / 3600);
@@ -666,24 +912,24 @@ class WkRunner {
             ? `${String(h).padStart(2,'0')}:${String(m).padStart(2,'0')}:${String(sec).padStart(2,'0')}`
             : `${String(m).padStart(2,'0')}:${String(sec).padStart(2,'0')}`;
     }
-
     _setText(id, text) {
         const el = document.getElementById(id);
-        if (el) el.textContent = text;
+        if (el && el.textContent !== text) el.textContent = text;
     }
     _setAttr(id, attr, val) {
         const el = document.getElementById(id);
         if (el) el.setAttribute(attr, val);
     }
-
     _countLoggedSets() {
         const session = window.wkState && window.wkState.activeSession;
         if (!session) return 0;
         return (session.exercises||[]).reduce((s, ex) => s + ((ex.sets||[]).length), 0);
     }
-
     _vibrate(pattern) {
-        try { if (navigator.vibrate) navigator.vibrate(pattern); } catch(e){}
+        try {
+            if (window.wkSettings && !window.wkSettings.get().timerVibrate) return;
+            if (navigator.vibrate) navigator.vibrate(pattern);
+        } catch(e){}
     }
     _beep(freq, gain, dur) {
         try {
@@ -700,19 +946,19 @@ class WkRunner {
 
 /* ── Global singleton ─────────────────────────────────────── */
 window.wkRunner = null;
+window.WK_PHASE = WK_PHASE;
 
 window.wkRunnerInit = function(session) {
     if (window.wkRunner) window.wkRunner.destroy();
     window.wkRunner = new WkRunner(session);
 };
 
-/* ── Intercept rest timer when runner is active ─────────── */
-// today-player.js is loaded before this script, so wkMaybeStartRest is defined.
+/* ── Suppress floating rest widget while runner is active ─ */
 (function() {
     const _orig = window.wkMaybeStartRest;
     window.wkMaybeStartRest = function(ex, setIndex, session) {
-        if (window.wkRunner && window.wkRunner.isRunning) {
-            // Runner handles rest display; skip floating widget but sync steps
+        if (window.wkRunner) {
+            // Runner handles rest visually; skip the floating widget.
             window.wkRunner._syncStepsToLogs();
             return;
         }

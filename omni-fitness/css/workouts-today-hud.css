@@ -223,6 +223,26 @@
   margin-bottom: 3px;
   transition: background .35s, border-color .35s, color .35s;
 }
+/* AWAIT_LOG: bright pulsing badge ("LOG SET") */
+.wkt-hud[data-phase="work"] .wkt-phase-badge--work {
+  /* default work look already coloured by --ph-text */
+}
+.wkt-phase-badge--paused {
+  background: rgba(180,190,205,.16) !important;
+  border-color: rgba(180,190,205,.42) !important;
+  color: #b4becd !important;
+}
+.wkt-phase-badge--complete {
+  background: rgba(57,255,20,.18) !important;
+  border-color: rgba(57,255,20,.55) !important;
+  color: #39ff14 !important;
+}
+/* When inner ring shows "LOG" prompt, attract attention */
+.wkt-rc-time {
+  transition: color .25s;
+}
+.wkt-hud .wkt-rc-time:not(:empty) { color: var(--ph-text); }
+.wkt-rc-time:empty { display: none; }
 
 .wkt-rc-name {
   font-size: 13px;

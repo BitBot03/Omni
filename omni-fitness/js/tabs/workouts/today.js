@@ -343,7 +343,11 @@ function renderExercise(ex) {
     if (tt === 'weight_reps' || tt === 'bodyweight_reps' || tt === 'assisted_weight_reps') {
         meta.push(`${target} sets × ${repStr} reps`);
     } else if (tt === 'time') {
-        meta.push(`${target} sets × time`);
+        const sec = Number(ex.setTimeSec) || Number(ex.repMax) || Number(ex.repMin) || 0;
+        meta.push(sec > 0 ? `${target} sets × ${sec}s` : `${target} sets × time`);
+    } else if (tt === 'weight_time') {
+        const sec = Number(ex.setTimeSec) || 0;
+        meta.push(sec > 0 ? `${target} sets × ${sec}s timed` : `${target} sets · weight/time`);
     } else if (tt === 'distance_time') {
         meta.push(`${target} sets · distance/time`);
     }
@@ -399,11 +403,13 @@ function renderSetsTable(ex, tt, target) {
 }
 
 function setColumnHeaders(tt, units) {
-    if (tt === 'time') return { cols:'36px 1fr 60px 50px', labels:['#','Time','RPE','✓'] };
-    if (tt === 'distance_time') return { cols:'36px 1fr 1fr 60px 50px', labels:['#','Distance','Time','RPE','✓'] };
-    if (tt === 'bodyweight_reps') return { cols:'36px 1fr 1fr 60px 50px', labels:['#','Reps',`+${units}`,'RPE','✓'] };
-    if (tt === 'assisted_weight_reps') return { cols:'36px 1fr 1fr 60px 50px', labels:['#','Reps',`-${units}`,'RPE','✓'] };
-    return { cols:'36px 1fr 1fr 60px 50px', labels:['#',units,'Reps','RPE','✓'] };
+    // Tracking-type-correct columns. RPE removed everywhere.
+    if (tt === 'time')               return { cols:'36px 1fr 50px',          labels:['#','Time','✓'] };
+    if (tt === 'weight_time')        return { cols:'36px 1fr 1fr 50px',      labels:['#',units,'Time','✓'] };
+    if (tt === 'distance_time')      return { cols:'36px 1fr 1fr 50px',      labels:['#','Distance','Time','✓'] };
+    if (tt === 'bodyweight_reps')    return { cols:'36px 1fr 1fr 50px',      labels:['#','Reps',`+${units}`,'✓'] };
+    if (tt === 'assisted_weight_reps') return { cols:'36px 1fr 1fr 50px',    labels:['#','Reps',`-${units}`,'✓'] };
+    return { cols:'36px 1fr 1fr 50px', labels:['#',units,'Reps','✓'] };
 }
 
 function renderSetRow(sexId, idx, set, tt, units, isCurrent) {
@@ -426,6 +432,9 @@ function renderSetRow(sexId, idx, set, tt, units, isCurrent) {
 
     if (tt === 'time') {
         cells += cell(done ? fmtDur(set.durationSec) : '');
+    } else if (tt === 'weight_time') {
+        cells += cell(done ? `${set.weight || 0}` : '');
+        cells += cell(done ? fmtDur(set.durationSec) : '');
     } else if (tt === 'distance_time') {
         cells += cell(done ? `${set.distance || 0} ${esc(set.distanceUnit || 'km')}` : '');
         cells += cell(done ? fmtDur(set.durationSec) : '');
@@ -440,7 +449,6 @@ function renderSetRow(sexId, idx, set, tt, units, isCurrent) {
         cells += cell(done ? `${set.reps || 0}` : '');
     }
 
-    cells += `<div class="wk-today-set-cell">${done && set.rpe != null ? set.rpe : '<span class="wk-today-set-empty">—</span>'}</div>`;
     cells += `<div class="wk-today-set-cell">${done ? '<span class="wk-today-set-checkmark">✓</span>' : '<span class="wk-today-set-empty">tap</span>'}</div>`;
 
     const doneCls  = done ? 'done is-done' : '';
@@ -588,7 +596,7 @@ window.wkOpenFinishSummary = async function() {
             <div class="wk-today-summary-stat"><b>${stats.duration}</b><span>Duration</span></div>
             <div class="wk-today-summary-stat"><b>${stats.totalSets}</b><span>Sets logged</span></div>
             <div class="wk-today-summary-stat"><b>${formatVolume(stats.volume)}</b><span>Total volume</span></div>
-            <div class="wk-today-summary-stat"><b>${settings.enableRPE ? (stats.avgRpe || '—') : '—'}</b><span>Avg RPE</span></div>
+            <div class="wk-today-summary-stat"><b>${stats.exercisesDone}/${stats.exercisesTotal}</b><span>Exercises</span></div>
         </div>
 
         ${stats.totalSets === 0 ? `
@@ -628,7 +636,8 @@ window.wkSaveAndCloseSession = async function(precomputedStats) {
             durationSec: stats.durationSec,
             totalSets: stats.totalSets,
             totalVolume: stats.volume,
-            avgRpe: stats.avgRpe || null
+            exercisesDone: stats.exercisesDone,
+            exercisesTotal: stats.exercisesTotal
         }
     };
 
@@ -656,13 +665,17 @@ window.wkSaveAndCloseSession = async function(precomputedStats) {
    STATS
    ═════════════════════════════════════════════════════════════ */
 function computeSessionStats(session) {
-    let totalSets = 0, volume = 0, rpeSum = 0, rpeCount = 0;
-    for (const ex of (session.exercises || [])) {
+    let totalSets = 0, volume = 0;
+    let exercisesDone = 0;
+    const exs = session.exercises || [];
+    for (const ex of exs) {
+        const setCount = (ex.sets || []).length;
+        totalSets += setCount;
         for (const s of (ex.sets || [])) {
-            totalSets++;
             volume += window.wkTodayHelpers.setVolume(s);
-            if (s.rpe != null && !isNaN(s.rpe)) { rpeSum += Number(s.rpe); rpeCount++; }
         }
+        const target = Number(ex.targetSets) || 0;
+        if (target > 0 && setCount >= target) exercisesDone++;
     }
     const durationSec = session.startedAt
         ? Math.floor((Date.now() - new Date(session.startedAt).getTime()) / 1000) : 0;
@@ -677,7 +690,8 @@ function computeSessionStats(session) {
         volume,
         durationSec,
         duration,
-        avgRpe: rpeCount ? (rpeSum / rpeCount).toFixed(1) : null
+        exercisesDone,
+        exercisesTotal: exs.length
     };
 }
 
