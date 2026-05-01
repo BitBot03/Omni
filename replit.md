@@ -29,6 +29,17 @@ A comprehensive fitness tracking dashboard built as a Single Page Application (S
 └── app/                  # Legacy/applet directory
 ```
 
+## Workouts Today Tab — Runner Logic
+The workout runner (`omni-fitness/js/tabs/workouts/today-runner.js`) was fully fixed:
+- **Stable `stepId`** per step (`{sessionId}|{blockId}|{exId}|SET|set:{i}|round:{r}`) — never changes during session
+- **Immutable queue** built once at session start; rebuilt only on exercise add/remove, preserving cursor by stepId
+- **Single cursor authority**: only `advance(cause)` moves the cursor; protected by `_advancing` re-entrancy guard
+- **Next button debounced** 200ms to prevent double-tap races
+- **Per-step timer-end guard** (`_endedStepIds` Set) — `_onCountdownDone` fires exactly once per step
+- **`next()` fixed**: no longer sets `phase = COMPLETE` before calling `wkAutoLogSet`; uses `AWAIT_LOG` transitional state and `_wasRunningBeforeLog` flag to correctly restore running state after async log
+- **`_syncStepsToLogs`**: tracks completedStepIds to prevent double-advance; passes `keepRunning` flag to `advance()`
+- **`today.js`**: set rows now carry `data-step-id` for precise CSS class sync
+
 ## Running the App
 ```bash
 npm run dev   # or npm start

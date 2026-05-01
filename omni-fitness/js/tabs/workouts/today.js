@@ -371,18 +371,28 @@ function renderSetsTable(ex, tt, target) {
     const headers = setColumnHeaders(tt, units);
     const totalRows = Math.max(target, ...sets.map(s => s.setIndex || 0));
 
+    // Build stepId lookup from runner queue (keyed by exId:setIndex)
+    const runner = window.wkRunner;
+    const stepIdMap = new Map();
+    if (runner && runner.steps) {
+        for (const s of runner.steps) {
+            if (s.type === 'SET' && s.exId === ex.id) {
+                stepIdMap.set(s.setIndex, s.stepId);
+            }
+        }
+    }
+
     let rows = '';
     for (let i = 1; i <= totalRows; i++) {
         const set = sets.find(s => s.setIndex === i);
 
-        // Highlight if this is the runner's current step
-        const runner = window.wkRunner;
         const isCurrent = runner && runner.currentStep &&
             runner.currentStep.type === 'SET' &&
             runner.currentStep.exId === ex.id &&
             runner.currentStep.setIndex === i;
 
-        rows += renderSetRow(ex.id, i, set, tt, units, isCurrent);
+        const stepId = stepIdMap.get(i) || '';
+        rows += renderSetRow(ex.id, i, set, tt, units, isCurrent, stepId);
     }
 
     return `
@@ -404,7 +414,7 @@ function setColumnHeaders(tt, units) {
     return { cols:'36px 1fr 1fr 50px', labels:['#',units,'Reps','✓'] };
 }
 
-function renderSetRow(sexId, idx, set, tt, units, isCurrent) {
+function renderSetRow(sexId, idx, set, tt, units, isCurrent, stepId) {
     const done = !!set;
     const typeCls = done ? (set.type || 'working') : '';
     const click = `onclick="wkOpenSetModal('${esc(sexId)}', ${idx})"`;
@@ -421,7 +431,6 @@ function renderSetRow(sexId, idx, set, tt, units, isCurrent) {
 
     let cells = '';
     cells += `<div class="wk-today-set-cell">${idx}</div>`;
-    // NOTE: data-exercise-id + data-set-index are used by the runner's _updateLoggerSync()
 
     const fmtW = val => (val != null && val !== '') ? val : '—';
     const fmtR = val => (val != null && val !== '') ? val : '—';
@@ -449,8 +458,9 @@ function renderSetRow(sexId, idx, set, tt, units, isCurrent) {
 
     const doneCls  = done ? 'done is-done' : '';
     const curCls   = isCurrent ? 'wkt-current-set' : '';
+    const sidAttr  = stepId ? ` data-step-id="${esc(stepId)}"` : '';
     return `<div class="wk-today-set-row ${doneCls} ${typeCls} ${curCls}"
-        data-exercise-id="${esc(sexId)}" data-set-index="${idx}" ${click}>${cells}</div>`;
+        data-exercise-id="${esc(sexId)}" data-set-index="${idx}"${sidAttr} ${click}>${cells}</div>`;
 }
 
 /* ═════════════════════════════════════════════════════════════
