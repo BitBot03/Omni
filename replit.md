@@ -29,6 +29,19 @@ A comprehensive fitness tracking dashboard built as a Single Page Application (S
 └── app/                  # Legacy/applet directory
 ```
 
+## Workouts Progress Tab
+Full-featured Progress subtab at `omni-fitness/js/tabs/workouts/progress.js` (IIFE module):
+- **Entry point**: `window.renderTabProgress(container)` — called by workouts.js router
+- **CSS**: `omni-fitness/css/workouts-progress.css` (`.pg-*` namespace, linked in index.html)
+- **Segments**: Overview · Exercises · Records (PRs) · Sessions — segmented control + date range filter (7d/30d/90d/YTD/All)
+- **Overview**: 6 stat cards, 16-week consistency heatmap, weekly session/volume bar sparklines, quick actions, recent PRs panel
+- **Exercises**: Left list (search, sparklines, session count) + right detail with SVG line/bar charts per tracking type (weight_reps: e1RM/top-weight/volume; bodyweight: reps; time; distance), all-time best sets table, sessions list
+- **Records**: PRs grouped by tracking type (weight+reps, bodyweight, timed, cardio) with auto-update on set edit
+- **Sessions**: List view (search) + calendar view (current month); right panel shows full exercise/set breakdown with inline edit & delete buttons
+- **Edit flow**: Edit set modal → save → recompute session totals → recompute PRs → refresh detail panel → emit `workoutUpdated`
+- **SVG charts**: `lineChart()` (smooth bezier + gradient fill), `barChart()`, `sparkline()` (polyline), `barSparkline()` (HTML divs), `drawHeatmap()` (HTML grid)
+- **Global handlers**: `pgSetSeg`, `pgSetRange`, `pgSelectEx`, `pgSelectSess`, `pgSetSessView`, `pgEditSetModal`, `pgSaveSet`, `pgDeleteSet`, `pgDeleteSession`, `pgSt_openLastSess`, `pgSt_openExFromOverview`
+
 ## Workouts Today Tab — Runner Logic
 The workout runner (`omni-fitness/js/tabs/workouts/today-runner.js`) was fully fixed:
 - **Stable `stepId`** per step (`{sessionId}|{blockId}|{exId}|SET|set:{i}|round:{r}`) — never changes during session
