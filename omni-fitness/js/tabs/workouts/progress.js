@@ -1,25 +1,41 @@
 /* ────────────────────────────────────────────────────────────
-   WORKOUTS · PROGRESS SUB-TAB  — Master Implementation
-   Segments: Overview / Exercises / Records (PRs) / Sessions
+   WORKOUTS · PROGRESS SUB-TAB  — Final Master Edition
+   Phase 0: Cleanup  | Phase 1: Pro UX  | Phase 2: Intelligence
+   Phase 3: Workload | Phase 4: Sessions Polish
    ──────────────────────────────────────────────────────────── */
 (function () {
 
   /* ── MODULE STATE ──────────────────────────────────────── */
   const pgSt = {
-    seg: 'overview',   // overview | exercises | records | sessions
-    range: '30d',      // 7d | 30d | 90d | ytd | all
+    seg: 'overview',
+    range: '30d',
     selExId: null,
     selSessId: null,
-    sessView: 'list',  // list | calendar
+    sessView: 'list',
     exSearch: '',
     sessSearch: '',
-    // loaded data
+    exFavOnly: false,
     sessions: [],
     allSets: [],
     library: [],
     prs: [],
+    routines: [],
     _container: null,
+    _undoTimer: null,
   };
+
+  /* ── FAVORITES (localStorage) ───────────────────────────── */
+  function getFavs() {
+    try { return new Set(JSON.parse(localStorage.getItem('omniPgFavs') || '[]')); }
+    catch { return new Set(); }
+  }
+  function saveFavs(s) { localStorage.setItem('omniPgFavs', JSON.stringify([...s])); }
+  function toggleFav(id) {
+    const f = getFavs();
+    if (f.has(id)) f.delete(id); else f.add(id);
+    saveFavs(f);
+  }
+  function isFav(id) { return getFavs().has(id); }
 
   /* ── HELPERS ────────────────────────────────────────────── */
   const H = () => window.wkTodayHelpers;
@@ -46,7 +62,17 @@
     if (!v) return '0 kg';
     return v >= 1000 ? `${(v / 1000).toFixed(1)}t` : `${Math.round(v)} kg`;
   }
+  function fmtDelta(cur, prev, isVol) {
+    if (prev === 0 || prev == null) return null;
+    const diff = cur - prev;
+    const pct  = Math.round((diff / prev) * 100);
+    const sign = diff >= 0 ? '+' : '';
+    const cls  = diff > 0 ? 'pos' : diff < 0 ? 'neg' : 'neu';
+    const label = isVol ? `${sign}${fmtVol(Math.abs(diff))}` : `${sign}${diff}`;
+    return { cls, label, pct: `${sign}${pct}%` };
+  }
 
+  /* ── DATE RANGE HELPERS ─────────────────────────────────── */
   function getRangeStart(range) {
     const now = new Date();
     if (range === '7d')  return new Date(now - 7  * 86400000);
@@ -59,29 +85,43 @@
     const cut = getRangeStart(pgSt.range);
     return pgSt.sessions.filter(s => s.status === 'completed' && new Date(s.startedAt) >= cut);
   }
+  function getPrevFiltered() {
+    if (pgSt.range === 'all') return [];
+    const curStart  = getRangeStart(pgSt.range);
+    const rangeMs   = Date.now() - curStart.getTime();
+    const prevEnd   = new Date(curStart.getTime() - 1);
+    const prevStart = new Date(curStart.getTime() - rangeMs);
+    return pgSt.sessions.filter(s =>
+      s.status === 'completed' &&
+      new Date(s.startedAt) >= prevStart &&
+      new Date(s.startedAt) <= prevEnd
+    );
+  }
   function getExById(id) {
     return pgSt.library.find(e => e.id === id) || null;
   }
 
   /* ── DATA LOADING ───────────────────────────────────────── */
   async function loadData() {
-    const [sessions, allSets, lib, custom, prs] = await Promise.all([
+    const [sessions, allSets, lib, custom, prs, routines] = await Promise.all([
       apexDB.getAll('workoutSessions'),
       apexDB.getAll('workoutSets'),
       apexDB.getAll('exerciseLibrary'),
       apexDB.getAll('customExercises'),
       apexDB.getAll('personalRecords'),
+      apexDB.getAll('routines').catch(() => []),
     ]);
     pgSt.sessions = sessions.sort((a, b) => new Date(b.startedAt) - new Date(a.startedAt));
     pgSt.allSets  = allSets;
     pgSt.library  = [...lib, ...custom.map(e => ({ ...e, isCustom: true }))];
     pgSt.prs      = prs;
+    pgSt.routines = routines;
   }
 
   /* ── ENTRY POINT ────────────────────────────────────────── */
   window.renderTabProgress = async function (container) {
     pgSt._container = container;
-    container.innerHTML = `<div class="pg-wrap"><p class="muted" style="text-align:center;padding:60px 0;font-size:14px;">Loading Progress...</p></div>`;
+    container.innerHTML = `<div class="pg-wrap"><p class="muted" style="text-align:center;padding:60px 0;font-size:14px;">Loading Progress…</p></div>`;
     await loadData();
     renderPg();
   };
@@ -107,7 +147,7 @@
     pgSt.selSessId = id;
     const pane = document.getElementById('pgDetailPane');
     if (pane) {
-      pane.innerHTML = `<div id="pgSessDetailWrap"><p class="muted" style="padding:30px;text-align:center;">Loading...</p></div>`;
+      pane.innerHTML = `<div id="pgSessDetailWrap"><p class="muted" style="padding:30px;text-align:center;">Loading…</p></div>`;
       renderSessDetailAsync(id);
     }
     document.querySelectorAll('.pg-sess-item').forEach(el => {
@@ -120,12 +160,42 @@
     const el = document.getElementById('pgContent');
     if (el) { el.innerHTML = renderSessions(filtered); bindAfterRender(); }
   };
+  window.pgToggleFav = function (id, e) {
+    e && e.stopPropagation();
+    toggleFav(id);
+    // Refresh just the icon
+    document.querySelectorAll(`.pg-pin-btn[data-fav-id="${id}"]`).forEach(btn => {
+      btn.classList.toggle('pinned', isFav(id));
+      btn.title = isFav(id) ? 'Unpin' : 'Pin';
+    });
+    if (pgSt.exFavOnly) { updateExList(); }
+  };
+  window.pgToggleFavOnly = function () {
+    pgSt.exFavOnly = !pgSt.exFavOnly;
+    const chip = document.getElementById('pgFavChip');
+    if (chip) chip.classList.toggle('active', pgSt.exFavOnly);
+    updateExList();
+  };
+  // Deep-link helpers
+  window.pgSt_openLastSess = function () {
+    const f = getFiltered();
+    if (f[0]) { pgSt.selSessId = f[0].id; pgSetSeg('sessions'); }
+  };
+  window.pgSt_openExFromOverview = function (id) {
+    pgSt.selExId = id; pgSetSeg('exercises');
+  };
+  window.pgSt_openExAndHighlightPR = function (id) {
+    pgSt.selExId = id; pgSetSeg('exercises');
+  };
+  window.pgSt_openSessFromEx = function (sessId) {
+    pgSt.selSessId = sessId; pgSetSeg('sessions');
+  };
 
   /* ── MAIN RENDER ────────────────────────────────────────── */
   function renderPg() {
     const c = pgSt._container;
     if (!c) return;
-    const ranges = [['7d','7 Days'],['30d','30 Days'],['90d','90 Days'],['ytd','This Year'],['all','All Time']];
+    const ranges = [['7d','7D'],['30d','30D'],['90d','90D'],['ytd','YTD'],['all','All']];
     const segs   = [['overview','⚡ Overview'],['exercises','📈 Exercises'],['records','🏆 Records'],['sessions','📋 Sessions']];
 
     c.innerHTML = `
@@ -141,16 +211,17 @@
         <div id="pgContent"></div>
       </div>`;
     renderContent();
+    ensureTooltipDiv();
   }
 
   function renderContent() {
     const el = document.getElementById('pgContent');
     if (!el) return;
     const filtered = getFiltered();
-    if (pgSt.seg === 'overview')   el.innerHTML = renderOverview(filtered);
-    else if (pgSt.seg === 'exercises') el.innerHTML = renderExercises(filtered);
-    else if (pgSt.seg === 'records')   el.innerHTML = renderRecords(filtered);
-    else if (pgSt.seg === 'sessions')  el.innerHTML = renderSessions(filtered);
+    if      (pgSt.seg === 'overview')   el.innerHTML = renderOverview(filtered);
+    else if (pgSt.seg === 'exercises')  el.innerHTML = renderExercises(filtered);
+    else if (pgSt.seg === 'records')    el.innerHTML = renderRecords(filtered);
+    else if (pgSt.seg === 'sessions')   el.innerHTML = renderSessions(filtered);
     bindAfterRender();
   }
 
@@ -159,42 +230,120 @@
     if (exIn) { exIn.value = pgSt.exSearch; exIn.oninput = e => { pgSt.exSearch = e.target.value; updateExList(); }; }
     const sIn = document.getElementById('pgSessSearch');
     if (sIn) { sIn.value = pgSt.sessSearch; sIn.oninput = e => { pgSt.sessSearch = e.target.value; updateSessList(); }; }
-    // Auto-load session detail if already selected
     if (pgSt.seg === 'sessions' && pgSt.selSessId) renderSessDetailAsync(pgSt.selSessId);
+    if (pgSt.seg === 'exercises' && pgSt.selExId) {
+      setTimeout(() => {
+        document.querySelectorAll('.pg-list-item[data-ex-id]').forEach(el => {
+          el.classList.toggle('active', el.dataset.exId === pgSt.selExId);
+        });
+      }, 0);
+    }
   }
+
+  function ensureTooltipDiv() {
+    if (!document.getElementById('pgChartTip')) {
+      const t = document.createElement('div');
+      t.id = 'pgChartTip';
+      t.className = 'pg-chart-tip';
+      document.body.appendChild(t);
+    }
+  }
+
+  /* ── SVG Tooltip ─────────────────────────────────────────── */
+  window.pgShowTip = function (e, text) {
+    const t = document.getElementById('pgChartTip');
+    if (!t) return;
+    t.innerHTML = text;
+    t.style.display = 'block';
+    t.style.left = (e.clientX + 14) + 'px';
+    t.style.top  = (e.clientY - 38) + 'px';
+  };
+  window.pgHideTip = function () {
+    const t = document.getElementById('pgChartTip');
+    if (t) t.style.display = 'none';
+  };
 
   /* ══════════════════════════════════════════════════════════
      OVERVIEW
      ══════════════════════════════════════════════════════════ */
   function renderOverview(filtered) {
-    const totalSets = filtered.reduce((s, x) => s + (x.totals?.totalSets || 0), 0);
-    const totalVol  = filtered.reduce((s, x) => s + (x.totals?.totalVolume || 0), 0);
-    const totalDur  = filtered.reduce((s, x) => s + (x.totals?.durationSec || 0), 0);
-    const last      = filtered[0] || null;
-    const cut       = getRangeStart(pgSt.range);
-    const newPRs    = pgSt.prs.filter(p => p.lastUpdated && new Date(p.lastUpdated) >= cut);
-    const wBuckets  = weekBuckets(filtered, 12);
-    const vBuckets  = weekVolBuckets(filtered, 12);
+    const prev       = getPrevFiltered();
+    const totalSets  = filtered.reduce((s, x) => s + (x.totals?.totalSets || 0), 0);
+    const totalVol   = filtered.reduce((s, x) => s + (x.totals?.totalVolume || 0), 0);
+    const totalDur   = filtered.reduce((s, x) => s + (x.totals?.durationSec || 0), 0);
+    const prevSets   = prev.reduce((s, x) => s + (x.totals?.totalSets || 0), 0);
+    const prevVol    = prev.reduce((s, x) => s + (x.totals?.totalVolume || 0), 0);
+    const prevSess   = prev.length;
+    const last       = filtered[0] || null;
+    const cut        = getRangeStart(pgSt.range);
+    const newPRs     = pgSt.prs.filter(p => p.lastUpdated && new Date(p.lastUpdated) >= cut);
+    const wBuckets   = weekBuckets(filtered, 12);
+    const vBuckets   = weekVolBuckets(filtered, 12);
+
+    const dSess   = fmtDelta(filtered.length, prevSess);
+    const dSets   = fmtDelta(totalSets, prevSets);
+    const dVol    = fmtDelta(totalVol, prevVol, true);
+
+    function deltaHtml(d) {
+      if (!d) return '';
+      return `<div class="pg-delta ${d.cls}">${d.cls==='pos'?'▲':d.cls==='neg'?'▼':''}${d.label} <span style="opacity:.6;">(${d.pct})</span></div>`;
+    }
+
+    // Workload averages (per week)
+    const weekCount = Math.max(1, wBuckets.length);
+    const avgSessWk  = (wBuckets.reduce((a,b)=>a+b.v,0)/weekCount).toFixed(1);
+    const sBuckets   = weekSetBuckets(filtered, pgSt.allSets, 12);
+    const avgSetsWk  = (sBuckets.reduce((a,b)=>a+b.v,0)/weekCount).toFixed(0);
+    const avgVolWk   = fmtVol(vBuckets.reduce((a,b)=>a+b.v,0)/weekCount);
+    const tBuckets   = weekTimeBuckets(filtered, 12);
+    const avgTimeWk  = fmtDur(tBuckets.reduce((a,b)=>a+b.v,0)/weekCount);
+
+    // Set type distribution
+    const sessIds = new Set(filtered.map(s=>s.id));
+    const periodSets = pgSt.allSets.filter(s=>sessIds.has(s.sessionId));
+    const typeCounts = { working:0, warmup:0, drop:0, failure:0, other:0 };
+    for (const s of periodSets) {
+      const t = s.type || 'working';
+      if (typeCounts[t] !== undefined) typeCounts[t]++; else typeCounts.other++;
+    }
+    const totalSetCount = periodSets.length || 1;
+
+    // Routine insights
+    const routineNames = {};
+    for (const s of filtered) {
+      const n = s.name || 'Unnamed';
+      routineNames[n] = (routineNames[n] || 0) + 1;
+    }
+    const topRoutine = Object.entries(routineNames).sort((a,b)=>b[1]-a[1])[0];
+    const routineVolMap = {};
+    for (const s of filtered) {
+      const n = s.name || 'Unnamed';
+      routineVolMap[n] = (routineVolMap[n] || 0) + (s.totals?.totalVolume || 0);
+    }
+    const highVolRoutine = Object.entries(routineVolMap).sort((a,b)=>b[1]-a[1])[0];
 
     return `
       <div style="animation:fadeUp .28s ease; display:flex; flex-direction:column; gap:16px;">
 
-        <!-- Stat Cards -->
+        <!-- Stat Cards with deltas -->
         <div class="pg-stat-grid">
           <div class="pg-stat-card" style="--pg-accent:var(--teal)">
             <p class="pg-stat-lbl">Sessions</p>
             <p class="pg-stat-val">${filtered.length}</p>
             <p class="pg-stat-sub">${pgSt.range==='all'?'all time':'in range'}</p>
+            ${deltaHtml(dSess)}
           </div>
           <div class="pg-stat-card" style="--pg-accent:var(--orange)">
             <p class="pg-stat-lbl">Total Sets</p>
             <p class="pg-stat-val">${totalSets}</p>
             <p class="pg-stat-sub">working sets</p>
+            ${deltaHtml(dSets)}
           </div>
           <div class="pg-stat-card" style="--pg-accent:var(--green)">
-            <p class="pg-stat-lbl">Volume</p>
+            <p class="pg-stat-lbl">Tonnage</p>
             <p class="pg-stat-val">${fmtVol(totalVol)}</p>
             <p class="pg-stat-sub">weight × reps</p>
+            ${deltaHtml(dVol)}
           </div>
           <div class="pg-stat-card" style="--pg-accent:var(--purple)">
             <p class="pg-stat-lbl">Training Time</p>
@@ -209,11 +358,81 @@
           <div class="pg-stat-card" style="--pg-accent:var(--teal)">
             <p class="pg-stat-lbl">Last Session</p>
             <p class="pg-stat-val" style="font-size:18px;">${last ? fmtDate(last.startedAt, true) : '—'}</p>
-            <p class="pg-stat-sub">${last ? `${(last.exercises||[]).length} exercise${(last.exercises||[]).length!==1?'s':''}` : 'No sessions yet'}</p>
+            <p class="pg-stat-sub">${last ? `${(last.exercises||[]).length || '?'} exercise${((last.exercises||[]).length||0)!==1?'s':''}` : 'No sessions yet'}</p>
           </div>
         </div>
 
-        <!-- Heatmap -->
+        <!-- Workload Panel -->
+        <div class="pg-chart-card">
+          <div class="pg-chart-head">
+            <span class="pg-chart-title">⚡ Weekly Workload Averages</span>
+            <span style="font-size:11px;color:var(--muted);">Per week in range</span>
+          </div>
+          <div class="pg-workload-grid">
+            <div class="pg-workload-item">
+              <div class="pg-workload-val">${avgSessWk}</div>
+              <div class="pg-workload-lbl">Sessions / Wk</div>
+            </div>
+            <div class="pg-workload-item">
+              <div class="pg-workload-val">${avgSetsWk}</div>
+              <div class="pg-workload-lbl">Sets / Wk</div>
+            </div>
+            <div class="pg-workload-item">
+              <div class="pg-workload-val">${avgVolWk}</div>
+              <div class="pg-workload-lbl">Tonnage / Wk</div>
+            </div>
+            <div class="pg-workload-item">
+              <div class="pg-workload-val">${avgTimeWk}</div>
+              <div class="pg-workload-lbl">Time / Wk</div>
+            </div>
+          </div>
+        </div>
+
+        <!-- Set Type Distribution + Routine Insights -->
+        <div style="display:grid;grid-template-columns:repeat(auto-fill,minmax(280px,1fr));gap:14px;">
+          ${periodSets.length > 0 ? `
+          <div class="pg-chart-card">
+            <div class="pg-chart-head">
+              <span class="pg-chart-title">Set Type Breakdown</span>
+              <span style="font-size:11px;color:var(--muted);">${periodSets.length} sets</span>
+            </div>
+            <div style="height:8px;border-radius:6px;overflow:hidden;display:flex;gap:0;">
+              ${typeCounts.working  ? `<div style="flex:${typeCounts.working};background:var(--teal);opacity:.8;" title="Working"></div>` : ''}
+              ${typeCounts.warmup   ? `<div style="flex:${typeCounts.warmup};background:var(--orange);opacity:.75;" title="Warmup"></div>` : ''}
+              ${typeCounts.drop     ? `<div style="flex:${typeCounts.drop};background:var(--purple);opacity:.75;" title="Drop"></div>` : ''}
+              ${typeCounts.failure  ? `<div style="flex:${typeCounts.failure};background:var(--danger);opacity:.75;" title="Failure"></div>` : ''}
+              ${typeCounts.other    ? `<div style="flex:${typeCounts.other};background:rgba(255,255,255,.2);" title="Other"></div>` : ''}
+            </div>
+            <div class="pg-dist-legend">
+              ${typeCounts.working  ? `<div class="pg-dist-legend-item"><div class="pg-dist-legend-dot" style="background:var(--teal)"></div>${Math.round(typeCounts.working/totalSetCount*100)}% Working</div>` : ''}
+              ${typeCounts.warmup   ? `<div class="pg-dist-legend-item"><div class="pg-dist-legend-dot" style="background:var(--orange)"></div>${Math.round(typeCounts.warmup/totalSetCount*100)}% Warmup</div>` : ''}
+              ${typeCounts.drop     ? `<div class="pg-dist-legend-item"><div class="pg-dist-legend-dot" style="background:var(--purple)"></div>${Math.round(typeCounts.drop/totalSetCount*100)}% Drop</div>` : ''}
+              ${typeCounts.failure  ? `<div class="pg-dist-legend-item"><div class="pg-dist-legend-dot" style="background:var(--danger)"></div>${Math.round(typeCounts.failure/totalSetCount*100)}% Failure</div>` : ''}
+            </div>
+          </div>` : ''}
+
+          ${topRoutine ? `
+          <div class="pg-chart-card">
+            <div class="pg-chart-head">
+              <span class="pg-chart-title">Training Insights</span>
+            </div>
+            <div class="pg-routine-grid">
+              <div class="pg-routine-item">
+                <div class="pg-routine-item-lbl">Most Frequent</div>
+                <div class="pg-routine-item-val">${esc(topRoutine[0])}</div>
+                <div class="pg-routine-item-sub">${topRoutine[1]} session${topRoutine[1]!==1?'s':''}</div>
+              </div>
+              ${highVolRoutine ? `
+              <div class="pg-routine-item">
+                <div class="pg-routine-item-lbl">Highest Volume</div>
+                <div class="pg-routine-item-val">${esc(highVolRoutine[0])}</div>
+                <div class="pg-routine-item-sub">${fmtVol(highVolRoutine[1])} total</div>
+              </div>` : ''}
+            </div>
+          </div>` : ''}
+        </div>
+
+        <!-- Consistency Heatmap -->
         <div class="pg-chart-card">
           <div class="pg-chart-head">
             <span class="pg-chart-title">Consistency Heatmap</span>
@@ -229,18 +448,14 @@
               <span class="pg-chart-title">Sessions / Week</span>
               <span class="pg-chart-peak">${wBuckets.length ? Math.max(...wBuckets.map(b=>b.v)) : 0} peak</span>
             </div>
-            ${wBuckets.length >= 2
-              ? barSparkline(wBuckets.map(b=>({l:b.l,v:b.v})), 'var(--teal)')
-              : '<div class="pg-chart-empty">Not enough data yet</div>'}
+            ${wBuckets.length >= 2 ? barSparkline(wBuckets, 'var(--teal)') : '<div class="pg-chart-empty">Not enough data yet</div>'}
           </div>
           <div class="pg-chart-card">
             <div class="pg-chart-head">
               <span class="pg-chart-title">Volume / Week</span>
               <span class="pg-chart-peak">${vBuckets.some(b=>b.v>0) ? fmtVol(Math.max(...vBuckets.map(b=>b.v))) : '—'}</span>
             </div>
-            ${vBuckets.some(b=>b.v>0) && vBuckets.length >= 2
-              ? barSparkline(vBuckets.map(b=>({l:b.l,v:b.v})), 'var(--green)')
-              : '<div class="pg-chart-empty">No volume data yet</div>'}
+            ${vBuckets.some(b=>b.v>0) && vBuckets.length >= 2 ? barSparkline(vBuckets, 'var(--green)') : '<div class="pg-chart-empty">No volume data yet</div>'}
           </div>
         </div>
 
@@ -254,6 +469,7 @@
           </div>
         </div>
 
+        <!-- Recent PRs enriched -->
         ${newPRs.length > 0 ? `
           <div class="pg-chart-card">
             <div class="pg-chart-head">
@@ -264,19 +480,21 @@
               ${newPRs.slice(0,6).map(pr => {
                 const ex = getExById(pr.id);
                 if (!ex) return '';
+                const tt = normTT(ex.trackingType || '');
+                const ctx = buildPrContext(pr.id, tt);
                 return `
-                  <div class="pg-pr-card" onclick="pgSt_openExFromOverview('${ex.id}')">
+                  <div class="pg-pr-card" onclick="pgSt_openExAndHighlightPR('${ex.id}')">
                     <div class="pg-pr-icon">🏋️</div>
                     <div class="pg-pr-body">
                       <div class="pg-pr-name">${esc(ex.name)}</div>
-                      <div class="pg-pr-val">${pr.bestE1RM ? fmtN(pr.bestE1RM)+' kg e1RM' : fmtWt(pr.bestWeight)}</div>
+                      <div class="pg-pr-val">${pr.bestE1RM ? fmtN(pr.bestE1RM)+' kg e1RM' : pr.bestWeight ? fmtWt(pr.bestWeight) : '—'}</div>
+                      ${ctx.line ? `<div class="pg-pr-context">${ctx.line}</div>` : ''}
                       <div class="pg-pr-date">${fmtDate(pr.lastUpdated,true)}</div>
                     </div>
                   </div>`;
               }).join('')}
             </div>
-          </div>
-        ` : ''}
+          </div>` : ''}
 
         ${filtered.length === 0 ? `
           <div class="pg-empty">
@@ -287,25 +505,57 @@
       </div>`;
   }
 
-  // Helper references for overview button callbacks (avoid inline closure issues)
-  window.pgSt_openLastSess = function () {
-    const filtered = getFiltered();
-    if (filtered[0]) { pgSt.selSessId = filtered[0].id; pgSetSeg('sessions'); }
-  };
-  window.pgSt_openExFromOverview = function (id) {
-    pgSt.selExId = id; pgSetSeg('exercises');
-  };
+  /* ── PR Context Builder ─────────────────────────────────── */
+  function buildPrContext(exId, tt) {
+    const sets = pgSt.allSets.filter(s => s.exerciseId === exId);
+    if (!sets.length) return { line: '', delta: '' };
+    let prSet = null, line = '', delta = '';
+
+    if (tt === 'weight_reps') {
+      prSet = sets.reduce((best, s) => {
+        return e1RM(Number(s.weight)||0, Number(s.reps)||0) >
+               e1RM(Number(best.weight)||0, Number(best.reps)||0) ? s : best;
+      }, sets[0]);
+      if (prSet && prSet.weight && prSet.reps) {
+        line = `${prSet.reps} reps @ ${prSet.weight} kg`;
+        // Find 2nd best for delta
+        const sorted = [...sets]
+          .filter(s => s !== prSet && (Number(s.weight)||0) > 0)
+          .sort((a,b) => e1RM(Number(b.weight)||0,Number(b.reps)||0) - e1RM(Number(a.weight)||0,Number(a.reps)||0));
+        if (sorted[0]) {
+          const diff = (Number(prSet.weight)||0) - (Number(sorted[0].weight)||0);
+          if (diff > 0) delta = `+${diff} kg vs prev best`;
+        }
+      }
+    } else if (tt === 'bodyweight_reps' || tt === 'assisted_weight_reps') {
+      prSet = sets.reduce((best, s) => (Number(s.reps)||0) > (Number(best.reps)||0) ? s : best, sets[0]);
+      if (prSet?.reps) {
+        line = `${prSet.reps} reps best set`;
+        const sorted = [...sets].filter(s=>s!==prSet).sort((a,b)=>(Number(b.reps)||0)-(Number(a.reps)||0));
+        if (sorted[0] && (Number(sorted[0].reps)||0) > 0) delta = `+${(Number(prSet.reps)||0)-(Number(sorted[0].reps)||0)} reps vs prev`;
+      }
+    } else if (tt === 'time') {
+      prSet = sets.filter(s=>s.durationSec>0).reduce((best, s) => (s.durationSec||0) > (best.durationSec||0) ? s : best, sets[0]);
+      if (prSet?.durationSec) line = `${fmtDur(prSet.durationSec)} best`;
+    } else if (tt === 'distance_time') {
+      const withDist = sets.filter(s=>Number(s.distance)>0);
+      if (withDist.length) {
+        prSet = withDist.reduce((best, s) => (Number(s.distance)||0) > (Number(best.distance)||0) ? s : best, withDist[0]);
+        line = `${prSet.distance} ${prSet.distanceUnit||'km'}`;
+      }
+    }
+    return { line, delta };
+  }
 
   /* ══════════════════════════════════════════════════════════
      EXERCISES
      ══════════════════════════════════════════════════════════ */
   function buildExList(filtered) {
-    const sessIds = new Set(filtered.map(s => s.id));
-    const sets    = pgSt.allSets.filter(s => sessIds.has(s.sessionId));
+    const sessIds    = new Set(filtered.map(s => s.id));
+    const sets       = pgSt.allSets.filter(s => sessIds.has(s.sessionId));
     const sessDateMap = {};
     for (const s of pgSt.sessions) sessDateMap[s.id] = s.startedAt;
 
-    // Group by exerciseId (or name as fallback)
     const map = new Map();
     for (const s of sets) {
       const key = s.exerciseId || s.exerciseName || 'unknown';
@@ -318,20 +568,15 @@
       const ex  = getExById(key) || { id: key, name: data.name, trackingType: data.trackingType || 'Weight + Reps' };
       const tt  = normTT(ex.trackingType || data.trackingType || '');
       const sessCount = new Set(data.sets.map(s => s.sessionId)).size;
-      const lastDate  = data.sets
-        .map(s => s.completedAt || sessDateMap[s.sessionId] || '')
-        .filter(Boolean)
-        .sort()
-        .at(-1);
+      const lastDate  = data.sets.map(s => s.completedAt || sessDateMap[s.sessionId] || '').filter(Boolean).sort().at(-1);
 
-      // Quick stat for list display
       let stat = '';
       if (tt === 'weight_reps') {
         const best = Math.max(...data.sets.map(s => e1RM(Number(s.weight)||0, Number(s.reps)||0)));
         if (best > 0) stat = fmtN(best) + ' kg e1RM';
       } else if (tt === 'bodyweight_reps' || tt === 'assisted_weight_reps') {
         const best = Math.max(...data.sets.map(s => Number(s.reps)||0));
-        if (best > 0) stat = `${best} reps best`;
+        if (best > 0) stat = `${best} reps`;
       } else if (tt === 'time') {
         const vals = data.sets.filter(s => s.durationSec > 0).map(s => s.durationSec);
         if (vals.length) stat = fmtDur(Math.max(...vals));
@@ -340,28 +585,36 @@
         if (d > 0) stat = fmtN(d, 2) + ' km';
       }
 
-      // Sparkline: per-session primary metric
-      const hist = computeSessHistory(ex.id || key, sets, sessIds, tt, sessDateMap);
-      const spark = hist.slice(-8).map(d => d.primary || 0);
+      const hist  = computeSessHistory(ex.id || key, sets, sessIds, tt, sessDateMap);
+      const spark  = hist.slice(-8).map(d => d.primary || 0);
+      const trend  = computeTrend(hist.map(d => d.primary));
+      const fav    = isFav(ex.id || key);
 
-      list.push({ ex, sets: data.sets, lastDate, stat, spark, sessCount });
+      list.push({ ex, sets: data.sets, lastDate, stat, spark, sessCount, trend, fav });
     }
-    list.sort((a, b) => (b.lastDate || '').localeCompare(a.lastDate || '') || b.sessCount - a.sessCount);
+    list.sort((a, b) => {
+      if (a.fav !== b.fav) return a.fav ? -1 : 1;
+      return (b.lastDate || '').localeCompare(a.lastDate || '') || b.sessCount - a.sessCount;
+    });
     return list;
   }
 
   function renderExercises(filtered) {
     const all = buildExList(filtered);
     const q   = pgSt.exSearch.toLowerCase();
-    const vis = q ? all.filter(e => e.ex.name.toLowerCase().includes(q)) : all;
+    let vis   = q ? all.filter(e => e.ex.name.toLowerCase().includes(q)) : all;
+    if (pgSt.exFavOnly) vis = vis.filter(e => e.fav);
 
     const leftHtml = `
-      <div class="pg-search-wrap">
-        ${Icons.search(14, 1.5, 'position:absolute;left:11px;top:50%;transform:translateY(-50%);opacity:.45;pointer-events:none;')}
-        <input id="pgExSearch" class="pg-search-input" placeholder="Search exercises...">
+      <div style="display:flex;align-items:center;gap:8px;margin-bottom:10px;flex-wrap:wrap;">
+        <div class="pg-search-wrap" style="flex:1;min-width:140px;margin-bottom:0;">
+          ${Icons.search(14, 1.5, 'position:absolute;left:11px;top:50%;transform:translateY(-50%);opacity:.45;pointer-events:none;')}
+          <input id="pgExSearch" class="pg-search-input" placeholder="Search exercises…">
+        </div>
+        <button id="pgFavChip" class="pg-fav-chip${pgSt.exFavOnly?' active':''}" onclick="pgToggleFavOnly()">⭐ Pinned</button>
       </div>
       <div id="pgExList">
-        ${vis.length ? vis.map(item => exListItem(item)).join('') : emptyList('No exercises found')}
+        ${vis.length ? vis.map(item => exListItem(item)).join('') : emptyList(pgSt.exFavOnly ? 'No pinned exercises' : 'No exercises found')}
       </div>`;
 
     const rightHtml = pgSt.selExId ? renderExDetail() : `
@@ -388,6 +641,7 @@
 
   function exListItem(item) {
     const active = pgSt.selExId === item.ex.id;
+    const trendTag = item.trend ? `<span class="pg-trend-tag ${item.trend}">${item.trend==='up'?'▲ Up':item.trend==='down'?'▼ Down':'– Stable'}</span>` : '';
     return `
       <div class="pg-list-item${active?' active':''}" data-ex-id="${item.ex.id}" onclick="pgSelectEx('${item.ex.id}')">
         <div class="pg-li-icon">💪</div>
@@ -396,7 +650,12 @@
           <div class="pg-li-sub">${item.sessCount} session${item.sessCount!==1?'s':''} · ${item.lastDate ? fmtDate(item.lastDate,true) : '—'}</div>
           ${item.spark.length >= 3 ? `<div class="pg-li-spark">${sparkline(item.spark, 64, 16, '#00d4ff')}</div>` : ''}
         </div>
-        <div class="pg-li-right"><div class="pg-li-stat">${item.stat}</div></div>
+        <div class="pg-li-right">
+          <div class="pg-li-stat">${item.stat}</div>
+          ${trendTag}
+          <button class="pg-pin-btn${item.fav?' pinned':''}" data-fav-id="${item.ex.id}"
+            onclick="pgToggleFav('${item.ex.id}',event)" title="${item.fav?'Unpin':'Pin'}">⭐</button>
+        </div>
       </div>`;
   }
 
@@ -405,8 +664,28 @@
     if (!el) return;
     const all = buildExList(getFiltered());
     const q   = pgSt.exSearch.toLowerCase();
-    const vis = q ? all.filter(e => e.ex.name.toLowerCase().includes(q)) : all;
-    el.innerHTML = vis.length ? vis.map(exListItem).join('') : emptyList('No exercises match your search');
+    let vis   = q ? all.filter(e => e.ex.name.toLowerCase().includes(q)) : all;
+    if (pgSt.exFavOnly) vis = vis.filter(e => e.fav);
+    el.innerHTML = vis.length ? vis.map(exListItem).join('') : emptyList(pgSt.exFavOnly ? 'No pinned exercises' : 'No exercises match');
+  }
+
+  /* ── Trend Computation ──────────────────────────────────── */
+  function computeTrend(vals) {
+    const recent = vals.filter(v => v > 0).slice(-6);
+    if (recent.length < 3) return null;
+    const n = recent.length;
+    const xMean = (n - 1) / 2;
+    const yMean = recent.reduce((a, b) => a + b, 0) / n;
+    let num = 0, den = 0;
+    for (let i = 0; i < n; i++) {
+      num += (i - xMean) * (recent[i] - yMean);
+      den += (i - xMean) ** 2;
+    }
+    const slope = den ? num / den : 0;
+    const rel   = yMean ? slope / yMean : 0;
+    if (rel >  0.025) return 'up';
+    if (rel < -0.025) return 'down';
+    return 'stable';
   }
 
   /* ── Exercise Session History Computation ─────────────── */
@@ -458,8 +737,21 @@
     for (const s of pgSt.sessions) sessDateMap[s.id] = s.startedAt;
     const hist        = computeSessHistory(id, filtSets, sessIds, tt, sessDateMap);
     const pr          = pgSt.prs.find(p => p.id === id);
+    const ctx         = buildPrContext(id, tt);
+    const trend       = computeTrend(hist.map(d => d.primary));
+    const fav         = isFav(id);
 
-    // ── Charts
+    // Plateau detection: no improvement in last 6+ sessions
+    let plateauTag = '';
+    if (hist.length >= 6) {
+      const recent = hist.slice(-6).map(d => d.primary).filter(v => v > 0);
+      const plateauTrend = computeTrend(recent);
+      if (plateauTrend === 'down' || plateauTrend === 'stable') {
+        plateauTag = `<span class="pg-plateau-tag">⚠ No improvement in last ${recent.length} sessions</span>`;
+      }
+    }
+
+    // Charts
     let charts = '';
     if (hist.length < 2) {
       charts = `<div class="pg-chart-card"><div class="pg-chart-empty" style="padding:30px;">Log at least 2 sessions with this exercise to see charts.</div></div>`;
@@ -468,38 +760,34 @@
       const wtd  = hist.map(d => ({ x: d.date, y: d.secondary })).filter(d => d.y > 0);
       const vold = hist.map(d => ({ x: d.date, y: d.volume    })).filter(d => d.y > 0);
       charts = `
-        ${e1d.length>=2  ? chartCard('Estimated 1RM (Epley)',  fmtN(Math.max(...e1d.map(d=>d.y)))+' kg', lineChart(e1d,'#00d4ff')) : ''}
-        ${wtd.length>=2  ? chartCard('Top Set Weight',         fmtN(Math.max(...wtd.map(d=>d.y)),0)+' kg', lineChart(wtd,'#ff7a00')) : ''}
-        ${vold.length>=2 ? chartCard('Volume / Session',       fmtVol(Math.max(...vold.map(d=>d.y))),   barChart(vold,'#8b5cf6')) : ''}`;
+        ${e1d.length>=2  ? chartCard('Estimated 1RM (Epley)',  fmtN(Math.max(...e1d.map(d=>d.y)))+' kg', lineChart(e1d,'#00d4ff','kg e1RM')) : ''}
+        ${wtd.length>=2  ? chartCard('Top Set Weight',         fmtN(Math.max(...wtd.map(d=>d.y)),0)+' kg', lineChart(wtd,'#ff7a00','kg')) : ''}
+        ${vold.length>=2 ? chartCard('Volume / Session',       fmtVol(Math.max(...vold.map(d=>d.y))),   barChart(vold,'#8b5cf6','kg')) : ''}`;
     } else if (tt === 'bodyweight_reps' || tt === 'assisted_weight_reps') {
       const rpd  = hist.map(d => ({ x: d.date, y: d.primary  })).filter(d => d.y > 0);
       const totd = hist.map(d => ({ x: d.date, y: d.volume   })).filter(d => d.y > 0);
       charts = `
-        ${rpd.length>=2  ? chartCard('Best Reps / Session',   Math.max(...rpd.map(d=>d.y))+' reps', lineChart(rpd,'#00d4ff')) : ''}
-        ${totd.length>=2 ? chartCard('Total Reps / Session',  Math.max(...totd.map(d=>d.y))+' reps',barChart(totd,'#39ff14')) : ''}`;
+        ${rpd.length>=2  ? chartCard('Best Reps / Session',   Math.max(...rpd.map(d=>d.y))+' reps', lineChart(rpd,'#00d4ff','reps')) : ''}
+        ${totd.length>=2 ? chartCard('Total Reps / Session',  Math.max(...totd.map(d=>d.y))+' reps', barChart(totd,'#39ff14','reps')) : ''}`;
     } else if (tt === 'time') {
       const td  = hist.map(d => ({ x: d.date, y: d.primary  })).filter(d => d.y > 0);
       const tot = hist.map(d => ({ x: d.date, y: d.secondary})).filter(d => d.y > 0);
       charts = `
-        ${td.length>=2  ? chartCard('Best Time / Session',  fmtDur(Math.max(...td.map(d=>d.y))),  lineChart(td,'#00d4ff')) : ''}
-        ${tot.length>=2 ? chartCard('Total Time / Session', fmtDur(Math.max(...tot.map(d=>d.y))), barChart(tot,'#8b5cf6')) : ''}`;
+        ${td.length>=2  ? chartCard('Best Time / Session',  fmtDur(Math.max(...td.map(d=>d.y))),  lineChart(td,'#00d4ff','sec')) : ''}
+        ${tot.length>=2 ? chartCard('Total Time / Session', fmtDur(Math.max(...tot.map(d=>d.y))), barChart(tot,'#8b5cf6','sec')) : ''}`;
     } else if (tt === 'distance_time') {
       const dd = hist.map(d => ({ x: d.date, y: d.primary })).filter(d => d.y > 0);
-      charts = dd.length>=2 ? chartCard('Distance / Session', fmtN(Math.max(...dd.map(d=>d.y)),2)+' km', lineChart(dd,'#00d4ff')) : '';
+      charts = dd.length>=2 ? chartCard('Distance / Session', fmtN(Math.max(...dd.map(d=>d.y)),2)+' km', lineChart(dd,'#00d4ff','km')) : '';
     }
 
-    // ── All-time Best Sets table
+    // Best Sets table
     const allExSets = pgSt.allSets.filter(s => s.exerciseId === id);
     let bestSets = [];
     if (tt === 'weight_reps') {
-      bestSets = [...allExSets]
-        .filter(s => Number(s.weight) > 0 || Number(s.reps) > 0)
-        .sort((a, b) => e1RM(b.weight,b.reps) - e1RM(a.weight,a.reps))
-        .slice(0, 8);
+      bestSets = [...allExSets].filter(s => Number(s.weight)>0||Number(s.reps)>0)
+        .sort((a, b) => e1RM(b.weight,b.reps) - e1RM(a.weight,a.reps)).slice(0, 8);
     } else {
-      bestSets = [...allExSets]
-        .sort((a, b) => new Date(b.completedAt||0) - new Date(a.completedAt||0))
-        .slice(0, 8);
+      bestSets = [...allExSets].sort((a, b) => new Date(b.completedAt||0) - new Date(a.completedAt||0)).slice(0, 8);
     }
 
     let bestHead = '', bestRows = '';
@@ -518,7 +806,7 @@
         bestRows = bestSets.map((s, i) => `
           <tr>
             <td>${fmtDate(sessDateMap[s.sessionId]||s.completedAt, true)}</td>
-            ${tt==='assisted_weight_reps' ? `<td>${s.addedWeight?'-'+s.addedWeight+' kg':'—'}</td>` : ''}
+            ${tt==='assisted_weight_reps'?`<td>${s.addedWeight?'-'+s.addedWeight+' kg':'—'}</td>`:''}
             <td class="${i===0?'hi':''}">${s.reps||'—'}</td>
           </tr>`).join('');
       } else if (tt === 'time') {
@@ -539,7 +827,6 @@
       }
     }
 
-    // ── Sessions that include this exercise
     const sessWithEx = filtered.filter(sess => hist.some(h => h.sessId === sess.id));
 
     return `
@@ -552,20 +839,25 @@
               <h2 class="pg-detail-title">${esc(ex.name)}</h2>
               <p class="pg-detail-meta">${(ex.primaryMuscle||'').replace(/_/g,' ')}${ex.primaryMuscle&&ex.trackingType?' · ':''}${ex.trackingType||'Weight + Reps'}</p>
             </div>
-            <div style="font-size:12px;color:var(--muted);padding-top:4px;">${sessWithEx.length} session${sessWithEx.length!==1?'s':''}</div>
+            <div style="display:flex;align-items:center;gap:8px;">
+              ${trend ? `<span class="pg-trend-tag ${trend}">${trend==='up'?'▲ Trending Up':trend==='down'?'▼ Declining':'– Stable'}</span>` : ''}
+              <button class="pg-pin-btn${fav?' pinned':''}" data-fav-id="${id}" onclick="pgToggleFav('${id}',event)" title="${fav?'Unpin':'Pin'}">⭐</button>
+              <div style="font-size:12px;color:var(--muted);">${sessWithEx.length} session${sessWithEx.length!==1?'s':''}</div>
+            </div>
           </div>
           ${pr ? `
             <div style="display:flex;gap:8px;flex-wrap:wrap;margin-top:12px;">
-              ${pr.bestWeight ? `<span class="pg-pr-badge">🏋️ ${fmtWt(pr.bestWeight)} max weight</span>` : ''}
+              ${pr.bestWeight ? `<span class="pg-pr-badge">🏋️ ${fmtWt(pr.bestWeight)} max</span>` : ''}
               ${pr.bestE1RM  ? `<span class="pg-pr-badge">💯 ${fmtN(pr.bestE1RM)} kg e1RM</span>` : ''}
               ${pr.bestReps  ? `<span class="pg-pr-badge">🔁 ${pr.bestReps} reps best</span>` : ''}
+              ${ctx.line     ? `<span class="pg-pr-badge" style="background:rgba(0,212,255,.07);color:var(--teal);border-color:rgba(0,212,255,.2);">📍 ${ctx.line}</span>` : ''}
+              ${ctx.delta    ? `<span class="pg-pr-badge" style="background:rgba(57,255,20,.07);color:var(--green);border-color:rgba(57,255,20,.2);">📈 ${ctx.delta}</span>` : ''}
             </div>` : ''}
+          ${plateauTag ? `<div style="margin-top:10px;">${plateauTag}</div>` : ''}
         </div>
 
-        <!-- Charts -->
         ${charts}
 
-        <!-- Best Sets -->
         ${bestSets.length ? `
           <div class="pg-chart-card">
             <div class="pg-chart-head"><span class="pg-chart-title">Best Sets — All Time</span></div>
@@ -575,16 +867,15 @@
             </table>
           </div>` : ''}
 
-        <!-- Sessions with this exercise -->
         ${sessWithEx.length ? `
           <div class="pg-chart-card">
-            <div class="pg-chart-head"><span class="pg-chart-title">Sessions Containing This Exercise</span></div>
+            <div class="pg-chart-head"><span class="pg-chart-title">Sessions With This Exercise</span></div>
             <div style="display:flex;flex-direction:column;gap:5px;">
               ${sessWithEx.slice(0,8).map(sess => `
                 <div style="display:flex;align-items:center;justify-content:space-between;padding:8px 12px;border-radius:10px;background:rgba(255,255,255,.02);border:1px solid var(--line);cursor:pointer;transition:.15s;"
-                     onmouseover="this.style.background='rgba(255,255,255,.04)'"
+                     onmouseover="this.style.background='rgba(255,255,255,.045)'"
                      onmouseout="this.style.background='rgba(255,255,255,.02)'"
-                     onclick="pgSt.selSessId='${sess.id}';pgSetSeg('sessions');">
+                     onclick="pgSt_openSessFromEx('${sess.id}')">
                   <span style="font-size:13px;font-weight:600;">${fmtDate(sess.startedAt,true)}</span>
                   <span style="font-size:11px;color:var(--muted);display:flex;align-items:center;gap:4px;">${sess.totals?.totalSets||'?'} sets ${Icons.chevronRight(12)}</span>
                 </div>`).join('')}
@@ -597,12 +888,13 @@
      RECORDS (PRs)
      ══════════════════════════════════════════════════════════ */
   function renderRecords(filtered) {
+    const cut = getRangeStart(pgSt.range);
     const weightPRs = [], bwPRs = [], timePRs = [], distPRs = [], otherPRs = [];
     for (const pr of pgSt.prs) {
       const ex = getExById(pr.id);
       if (!ex) continue;
-      const tt = normTT(ex.trackingType || '');
-      const entry = { pr, ex };
+      const tt    = normTT(ex.trackingType || '');
+      const entry = { pr, ex, tt };
       if (tt === 'weight_reps')                              weightPRs.push(entry);
       else if (tt === 'bodyweight_reps' || tt === 'assisted_weight_reps') bwPRs.push(entry);
       else if (tt === 'time')                                timePRs.push(entry);
@@ -610,22 +902,41 @@
       else                                                   otherPRs.push(entry);
     }
 
-    function prSection(title, icon, list, valFn) {
+    // Sort by most recent
+    const sortByDate = arr => arr.sort((a,b) => new Date(b.pr.lastUpdated||0) - new Date(a.pr.lastUpdated||0));
+    [weightPRs, bwPRs, timePRs, distPRs, otherPRs].forEach(sortByDate);
+
+    function prCard({ pr, ex, tt }) {
+      const ctx = buildPrContext(pr.id, tt);
+      let val = '—';
+      if (tt === 'weight_reps')      val = pr.bestE1RM ? `${fmtN(pr.bestE1RM)} kg e1RM` : pr.bestWeight ? fmtWt(pr.bestWeight) : '—';
+      else if (tt === 'bodyweight_reps' || tt === 'assisted_weight_reps') val = pr.bestReps ? `${pr.bestReps} reps best` : '—';
+      else if (tt === 'time')         val = pr.bestTime ? fmtDur(pr.bestTime) : '—';
+      else if (tt === 'distance_time') val = pr.bestDistance ? `${pr.bestDistance} km` : '—';
+      else                             val = pr.bestWeight ? fmtWt(pr.bestWeight) : '—';
+
+      const isNew = pr.lastUpdated && new Date(pr.lastUpdated) >= cut;
+
+      return `
+        <div class="pg-pr-card" onclick="pgSt_openExAndHighlightPR('${ex.id}')">
+          <div class="pg-pr-icon">🏆</div>
+          <div class="pg-pr-body">
+            <div class="pg-pr-name">${esc(ex.name)}${isNew?` <span style="font-size:9px;padding:1px 5px;border-radius:4px;background:rgba(57,255,20,.15);color:var(--green);font-weight:900;">NEW</span>`:''}${ex.isCustom?` <span style="font-size:9px;color:var(--teal);">custom</span>`:''}
+            </div>
+            <div class="pg-pr-val">${val}</div>
+            ${ctx.line  ? `<div class="pg-pr-context">${ctx.line}</div>` : ''}
+            ${ctx.delta ? `<div class="pg-pr-delta pos">📈 ${ctx.delta}</div>` : ''}
+            <div class="pg-pr-date">Updated ${fmtDate(pr.lastUpdated,true)}</div>
+          </div>
+        </div>`;
+    }
+
+    function prSection(title, icon, list) {
       if (!list.length) return '';
       return `
         <div class="pg-pr-section">
           <p class="pg-pr-section-title">${icon} ${title}</p>
-          <div class="pg-pr-grid">
-            ${list.map(({ pr, ex }) => `
-              <div class="pg-pr-card" onclick="pgSt_openExFromOverview('${ex.id}')">
-                <div class="pg-pr-icon">${icon}</div>
-                <div class="pg-pr-body">
-                  <div class="pg-pr-name">${esc(ex.name)}</div>
-                  <div class="pg-pr-val">${valFn(pr)}</div>
-                  <div class="pg-pr-date">Updated ${fmtDate(pr.lastUpdated,true)}</div>
-                </div>
-              </div>`).join('')}
-          </div>
+          <div class="pg-pr-grid">${list.map(prCard).join('')}</div>
         </div>`;
     }
 
@@ -644,15 +955,11 @@
             <div class="pg-empty-title">No PRs yet</div>
             <div class="pg-empty-sub">Personal records are automatically tracked when you log sets. Start lifting!</div>
           </div>` : ''}
-        ${prSection('Weight + Reps', '🏋️', weightPRs, pr => {
-          if (pr.bestE1RM)  return `${fmtN(pr.bestE1RM)} kg e1RM`;
-          if (pr.bestWeight) return fmtWt(pr.bestWeight);
-          return '—';
-        })}
-        ${prSection('Bodyweight / Assisted', '🤸', bwPRs, pr => pr.bestReps ? `${pr.bestReps} reps best` : '—')}
-        ${prSection('Timed Exercises', '⏱️', timePRs, () => '—')}
-        ${prSection('Distance / Cardio', '🏃', distPRs, () => '—')}
-        ${prSection('Other', '⭐', otherPRs, pr => pr.bestWeight ? fmtWt(pr.bestWeight) : '—')}
+        ${prSection('Weight + Reps', '🏋️', weightPRs)}
+        ${prSection('Bodyweight / Assisted', '🤸', bwPRs)}
+        ${prSection('Timed Exercises', '⏱️', timePRs)}
+        ${prSection('Distance / Cardio', '🏃', distPRs)}
+        ${prSection('Other', '⭐', otherPRs)}
       </div>`;
   }
 
@@ -660,13 +967,11 @@
      SESSIONS
      ══════════════════════════════════════════════════════════ */
   function renderSessions(filtered) {
-    const q = pgSt.sessSearch.toLowerCase();
-    const vis = q
-      ? filtered.filter(s => {
-          const ex = (s.exercises||[]).map(e=>(e.name||'').toLowerCase()).join(' ');
-          return (s.name||'').toLowerCase().includes(q) || ex.includes(q);
-        })
-      : filtered;
+    const q   = pgSt.sessSearch.toLowerCase();
+    const vis = q ? filtered.filter(s => {
+      const ex = (s.exercises||[]).map(e=>(e.name||'').toLowerCase()).join(' ');
+      return (s.name||'').toLowerCase().includes(q) || ex.includes(q);
+    }) : filtered;
 
     const viewBtns = `
       <div style="display:flex;gap:6px;">
@@ -679,7 +984,7 @@
       leftHtml = `
         <div class="pg-search-wrap">
           ${Icons.search(14, 1.5, 'position:absolute;left:11px;top:50%;transform:translateY(-50%);opacity:.45;pointer-events:none;')}
-          <input id="pgSessSearch" class="pg-search-input" placeholder="Search sessions...">
+          <input id="pgSessSearch" class="pg-search-input" placeholder="Search sessions…">
         </div>
         <div id="pgSessList" style="display:flex;flex-direction:column;gap:5px;">
           ${vis.length ? vis.map(sessCard).join('') : emptyList('No sessions found')}
@@ -689,7 +994,7 @@
     }
 
     const rightHtml = pgSt.selSessId
-      ? `<div id="pgSessDetailWrap"><p class="muted" style="padding:30px;text-align:center;">Loading...</p></div>`
+      ? `<div id="pgSessDetailWrap"><p class="muted" style="padding:30px;text-align:center;">Loading…</p></div>`
       : `<div class="pg-empty"><div class="pg-empty-icon">📋</div><div class="pg-empty-title">Select a session</div><div class="pg-empty-sub">Pick a session to view details, edit or delete sets.</div></div>`;
 
     return `
@@ -716,9 +1021,9 @@
 
   function sessCard(sess) {
     const active = pgSt.selSessId === sess.id;
-    const exN = (sess.exercises||[]).length;
-    const dur = sess.totals?.durationSec;
-    const vol = sess.totals?.totalVolume;
+    const exN  = (sess.exercises||[]).length;
+    const dur  = sess.totals?.durationSec;
+    const vol  = sess.totals?.totalVolume;
     const sets = sess.totals?.totalSets;
     return `
       <div class="pg-sess-item${active?' active':''}" data-sess-id="${sess.id}" onclick="pgSelectSess('${sess.id}')">
@@ -753,12 +1058,11 @@
     if (el) el.innerHTML = buildSessDetailHtml(sess, sets);
   }
 
-  function buildSessDetailHtml(sess, sets) {
+  function buildSessDetailHtml(sess, sets, bannerMsg) {
     const dur     = sess.totals?.durationSec;
     const vol     = sess.totals?.totalVolume;
     const exCount = (sess.exercises||[]).length;
 
-    // Group sets by session exercise
     const exMap = new Map();
     for (const s of sets) {
       const key = s.sessionExerciseId || s.exerciseId || s.exerciseName || 'unk';
@@ -777,7 +1081,7 @@
     let exBlocks = '';
     if (exMap.size > 0) {
       exBlocks = [...exMap.values()].map(ex => {
-        const tt = normTT(ex.trackingType);
+        const tt     = normTT(ex.trackingType);
         const sorted = [...ex.sets].sort((a, b) => (a.setIndex||0) - (b.setIndex||0));
         let head = '', rows = '';
 
@@ -798,7 +1102,7 @@
             <tr>
               <td style="color:var(--muted)">${i+1}</td>
               <td><span class="pg-set-type-badge ${s.type||'working'}">${s.type||'working'}</span></td>
-              ${tt==='assisted_weight_reps' ? `<td>${s.addedWeight?'-'+s.addedWeight+' kg':'—'}</td>` : ''}
+              ${tt==='assisted_weight_reps'?`<td>${s.addedWeight?'-'+s.addedWeight+' kg':'—'}</td>`:''}
               <td>${s.reps||'—'}</td>
               <td>${setActions(s.id, sess.id)}</td>
             </tr>`).join('');
@@ -830,13 +1134,15 @@
             </tr>`).join('');
         }
 
+        // Clickable exercise name → drill into Exercises tab
+        const exNameLink = ex.exerciseId
+          ? `<div class="pg-ex-block-name" onclick="pgSt_openExAndHighlightPR('${ex.exerciseId}')" title="View exercise progress">${esc(ex.name)}</div>`
+          : `<div class="pg-ex-block-name">${esc(ex.name)}</div>`;
+
         return `
           <div class="pg-ex-block">
             <div class="pg-ex-block-head">
-              <div>
-                <div class="pg-ex-block-name">${esc(ex.name)}</div>
-                <div class="pg-ex-block-type">${ex.trackingType}</div>
-              </div>
+              <div>${exNameLink}<div class="pg-ex-block-type">${ex.trackingType}</div></div>
               <span style="font-size:12px;color:var(--muted);">${ex.sets.length} set${ex.sets.length!==1?'s':''}</span>
             </div>
             <table class="pg-sets-table">
@@ -858,6 +1164,8 @@
     return `
       <div style="animation:fadeUp .22s ease;display:flex;flex-direction:column;gap:14px;" id="pgSessDetailWrap">
 
+        ${bannerMsg ? `<div class="pg-update-banner">${Icons.check(14)} ${bannerMsg}</div>` : ''}
+
         <!-- Session Header -->
         <div class="pg-sess-detail-header">
           <div style="display:flex;align-items:flex-start;justify-content:space-between;gap:10px;flex-wrap:wrap;">
@@ -866,14 +1174,15 @@
               <h2 class="pg-detail-title" style="margin:0;">${esc(sess.name||'Workout')}</h2>
             </div>
             <div class="pg-action-row">
+              <button class="pg-btn orange sm" onclick="pgRepeatSession('${sess.id}')">🔁 Repeat</button>
               <button class="pg-btn danger sm" onclick="pgDeleteSession('${sess.id}')">${Icons.trash(12)} Delete</button>
             </div>
           </div>
           <div class="pg-sess-totals">
-            ${dur    ? `<div class="pg-sess-total-item"><div class="pg-sess-total-val">${fmtDur(dur)}</div><div class="pg-sess-total-lbl">Duration</div></div>` : ''}
+            ${dur       ? `<div class="pg-sess-total-item"><div class="pg-sess-total-val">${fmtDur(dur)}</div><div class="pg-sess-total-lbl">Duration</div></div>` : ''}
             ${sets.length ? `<div class="pg-sess-total-item"><div class="pg-sess-total-val">${sets.length}</div><div class="pg-sess-total-lbl">Sets</div></div>` : ''}
-            ${exCount ? `<div class="pg-sess-total-item"><div class="pg-sess-total-val">${exCount}</div><div class="pg-sess-total-lbl">Exercises</div></div>` : ''}
-            ${vol     ? `<div class="pg-sess-total-item"><div class="pg-sess-total-val">${fmtVol(vol)}</div><div class="pg-sess-total-lbl">Volume</div></div>` : ''}
+            ${exCount   ? `<div class="pg-sess-total-item"><div class="pg-sess-total-val">${exCount}</div><div class="pg-sess-total-lbl">Exercises</div></div>` : ''}
+            ${vol       ? `<div class="pg-sess-total-item"><div class="pg-sess-total-val">${fmtVol(vol)}</div><div class="pg-sess-total-lbl">Volume</div></div>` : ''}
           </div>
         </div>
 
@@ -924,8 +1233,47 @@
   }
 
   /* ══════════════════════════════════════════════════════════
-     SESSION EDIT / DELETE ACTIONS
+     PHASE 4 — SESSION ACTIONS (undo, confirm, repeat)
      ══════════════════════════════════════════════════════════ */
+
+  /* Custom confirm dialog */
+  function pgConfirm(msg, sub, label, onConfirm) {
+    document.getElementById('pgConfirmDlg')?.remove();
+    const dlg = document.createElement('div');
+    dlg.id = 'pgConfirmDlg';
+    dlg.className = 'pg-confirm-overlay';
+    dlg.innerHTML = `
+      <div class="pg-confirm-box">
+        <div class="pg-confirm-icon">🗑️</div>
+        <div class="pg-confirm-msg">${esc(msg)}</div>
+        ${sub ? `<div class="pg-confirm-sub">${esc(sub)}</div>` : ''}
+        <div class="pg-confirm-btns">
+          <button class="pg-btn ghost" onclick="document.getElementById('pgConfirmDlg').remove()">Cancel</button>
+          <button class="pg-btn danger" id="pgConfirmOk">${label || 'Delete'}</button>
+        </div>
+      </div>`;
+    document.body.appendChild(dlg);
+    document.getElementById('pgConfirmOk').onclick = () => { dlg.remove(); onConfirm(); };
+  }
+
+  /* Undo toast */
+  function pgShowUndo(msg, undoFn) {
+    document.getElementById('pgUndoToast')?.remove();
+    clearTimeout(pgSt._undoTimer);
+    const el = document.createElement('div');
+    el.id = 'pgUndoToast';
+    el.className = 'pg-undo-toast';
+    el.innerHTML = `<span>${esc(msg)}</span><button class="pg-undo-btn" id="pgUndoBtn">Undo</button>`;
+    document.body.appendChild(el);
+    document.getElementById('pgUndoBtn').onclick = () => {
+      clearTimeout(pgSt._undoTimer);
+      el.remove();
+      undoFn();
+    };
+    pgSt._undoTimer = setTimeout(() => el.remove(), 5000);
+  }
+
+  /* Edit set modal */
   window.pgEditSetModal = async function (setId) {
     const s  = pgSt.allSets.find(x => x.id === setId);
     if (!s) return;
@@ -961,45 +1309,45 @@
           <input class="pg-modal-input" id="pgEd_reps" type="number" min="0" value="${s.reps||''}"></div>`;
     }
 
-    const el = document.createElement('div');
-    el.className = 'pg-modal-overlay'; el.id = 'pgSetModal';
-    el.innerHTML = `
+    const overlay = document.createElement('div');
+    overlay.className = 'pg-modal-overlay';
+    overlay.id = 'pgSetModal';
+    overlay.innerHTML = `
       <div class="pg-modal">
         <div class="pg-modal-title">
           Edit Set${ex ? ' — ' + esc(ex.name) : ''}
-          <button class="pg-btn ghost icon-only" onclick="document.getElementById('pgSetModal').remove()">${Icons.close(16)}</button>
+          <button class="pg-btn ghost icon-only" onclick="document.getElementById('pgSetModal').remove()" style="border:none;">${Icons.close(16)}</button>
         </div>
         ${fields}
         <div class="pg-modal-actions">
           <button class="pg-btn ghost" onclick="document.getElementById('pgSetModal').remove()">Cancel</button>
-          <button class="pg-btn teal" onclick="pgSaveSet('${setId}','${s.sessionId}')">Save Changes</button>
+          <button class="pg-btn teal" onclick="pgSaveSet('${setId}','${s.sessionId}')">${Icons.save(14)} Save</button>
         </div>
       </div>`;
-    document.body.appendChild(el);
-    // Focus first input
-    setTimeout(() => el.querySelector('.pg-modal-input')?.focus(), 50);
+    document.body.appendChild(overlay);
+    overlay.onclick = e => { if (e.target === overlay) overlay.remove(); };
+    overlay.querySelector('.pg-modal-input')?.focus();
   };
 
+  const gv = (id, fallback) => document.getElementById(id)?.value ?? fallback;
+
   window.pgSaveSet = async function (setId, sessionId) {
-    const s = pgSt.allSets.find(x => x.id === setId);
+    const s   = pgSt.allSets.find(x => x.id === setId);
     if (!s) return;
     const tt  = normTT(s.trackingType || '');
     const upd = { ...s };
+    const prev = { ...s }; // for undo
 
-    const gv = (id, fallback) => { const el = document.getElementById(id); return el ? el.value : fallback; };
-    if (tt === 'weight_reps' || tt === 'assisted_weight_reps') {
-      upd.weight = parseFloat(gv('pgEd_weight', s.weight)) || s.weight;
-      upd.reps   = parseInt(gv('pgEd_reps', s.reps)) || s.reps;
-    } else if (tt === 'bodyweight_reps') {
-      upd.reps   = parseInt(gv('pgEd_reps', s.reps)) || s.reps;
+    if (tt === 'distance_time') {
+      upd.distance    = parseFloat(gv('pgEd_dist', s.distance))    || s.distance;
+      upd.durationSec = parseFloat(gv('pgEd_dur',  s.durationSec)) || s.durationSec;
     } else if (tt === 'time') {
-      upd.durationSec = parseInt(gv('pgEd_dur', s.durationSec)) || s.durationSec;
-    } else if (tt === 'distance_time') {
-      upd.distance    = parseFloat(gv('pgEd_dist', s.distance)) || s.distance;
-      upd.durationSec = parseInt(gv('pgEd_dur', s.durationSec)) || s.durationSec;
+      upd.durationSec = parseFloat(gv('pgEd_dur', s.durationSec)) || s.durationSec;
+    } else if (tt === 'bodyweight_reps') {
+      upd.reps = parseInt(gv('pgEd_reps', s.reps)) || s.reps;
     } else {
       upd.weight = parseFloat(gv('pgEd_weight', s.weight)) || s.weight;
-      upd.reps   = parseInt(gv('pgEd_reps', s.reps)) || s.reps;
+      upd.reps   = parseInt(gv('pgEd_reps', s.reps))       || s.reps;
     }
 
     await apexDB.put('workoutSets', upd);
@@ -1011,55 +1359,107 @@
     pgSt.prs = await apexDB.getAll('personalRecords');
 
     document.getElementById('pgSetModal')?.remove();
-    toast('Set updated');
 
-    // Refresh detail
     const sess = pgSt.sessions.find(x => x.id === sessionId);
     const sets = await apexDB.getByIndex('workoutSets', 'sessionId', sessionId);
     pgSt.allSets = pgSt.allSets.filter(x => x.sessionId !== sessionId);
     pgSt.allSets.push(...sets);
     const pane = document.getElementById('pgSessDetailWrap') || document.getElementById('pgDetailPane');
-    if (pane && sess) pane.innerHTML = buildSessDetailHtml(sess, sets);
+    if (pane && sess) pane.innerHTML = buildSessDetailHtml(sess, sets, 'Totals and PRs updated');
+
     document.dispatchEvent(new Event('workoutUpdated'));
   };
 
   window.pgDeleteSet = async function (setId, sessionId) {
-    if (!confirm('Delete this set? This cannot be undone.')) return;
     const s = pgSt.allSets.find(x => x.id === setId);
-    await apexDB.delete('workoutSets', setId);
-    pgSt.allSets = pgSt.allSets.filter(x => x.id !== setId);
-    await recomputeSessionTotals(sessionId);
-    if (s?.exerciseId) await recomputePRForEx(s.exerciseId);
-    pgSt.prs = await apexDB.getAll('personalRecords');
-    toast('Set deleted');
-    const sess = pgSt.sessions.find(x => x.id === sessionId);
-    const sets = await apexDB.getByIndex('workoutSets', 'sessionId', sessionId);
-    pgSt.allSets = pgSt.allSets.filter(x => x.sessionId !== sessionId);
-    pgSt.allSets.push(...sets);
-    const pane = document.getElementById('pgSessDetailWrap') || document.getElementById('pgDetailPane');
-    if (pane && sess) pane.innerHTML = buildSessDetailHtml(sess, sets);
-    document.dispatchEvent(new Event('workoutUpdated'));
+    if (!s) return;
+
+    pgConfirm('Delete this set?', 'This can be undone for 5 seconds.', 'Delete Set', async () => {
+      await apexDB.delete('workoutSets', setId);
+      pgSt.allSets = pgSt.allSets.filter(x => x.id !== setId);
+      await recomputeSessionTotals(sessionId);
+      if (s?.exerciseId) await recomputePRForEx(s.exerciseId);
+      pgSt.prs = await apexDB.getAll('personalRecords');
+
+      const sess = pgSt.sessions.find(x => x.id === sessionId);
+      const sets = await apexDB.getByIndex('workoutSets', 'sessionId', sessionId);
+      pgSt.allSets = pgSt.allSets.filter(x => x.sessionId !== sessionId);
+      pgSt.allSets.push(...sets);
+      const pane = document.getElementById('pgSessDetailWrap') || document.getElementById('pgDetailPane');
+      if (pane && sess) pane.innerHTML = buildSessDetailHtml(sess, sets, 'Totals and PRs updated');
+
+      document.dispatchEvent(new Event('workoutUpdated'));
+
+      // Undo: restore set
+      pgShowUndo('Set deleted', async () => {
+        await apexDB.put('workoutSets', s);
+        pgSt.allSets.push(s);
+        await recomputeSessionTotals(sessionId);
+        if (s.exerciseId) await recomputePRForEx(s.exerciseId);
+        pgSt.prs = await apexDB.getAll('personalRecords');
+        const refreshedSets = await apexDB.getByIndex('workoutSets', 'sessionId', sessionId);
+        pgSt.allSets = pgSt.allSets.filter(x => x.sessionId !== sessionId);
+        pgSt.allSets.push(...refreshedSets);
+        if (pane && sess) pane.innerHTML = buildSessDetailHtml(sess, refreshedSets, 'Set restored');
+        document.dispatchEvent(new Event('workoutUpdated'));
+      });
+    });
   };
 
   window.pgDeleteSession = async function (sessId) {
-    if (!confirm('Permanently delete this session and all its sets? This cannot be undone.')) return;
-    const sets = await apexDB.getByIndex('workoutSets', 'sessionId', sessId);
-    for (const s of sets) await apexDB.delete('workoutSets', s.id);
-    await apexDB.delete('workoutSessions', sessId);
-    pgSt.sessions = pgSt.sessions.filter(s => s.id !== sessId);
-    pgSt.allSets  = pgSt.allSets.filter(s => s.sessionId !== sessId);
-    pgSt.selSessId = null;
-    toast('Session deleted');
-    if (window.loadWorkoutState) await window.loadWorkoutState();
-    renderPg();
-    document.dispatchEvent(new Event('workoutUpdated'));
+    const sess = pgSt.sessions.find(s => s.id === sessId);
+    const sessName = sess ? (sess.name || 'Workout') : 'Session';
+    const savedSets = pgSt.allSets.filter(s => s.sessionId === sessId);
+
+    pgConfirm(
+      `Delete "${sessName}"?`,
+      'All sets in this session will be removed. Can be undone for 5 seconds.',
+      'Delete Session',
+      async () => {
+        const sets = await apexDB.getByIndex('workoutSets', 'sessionId', sessId);
+        for (const s of sets) await apexDB.delete('workoutSets', s.id);
+        await apexDB.delete('workoutSessions', sessId);
+        pgSt.sessions = pgSt.sessions.filter(s => s.id !== sessId);
+        pgSt.allSets  = pgSt.allSets.filter(s => s.sessionId !== sessId);
+        pgSt.selSessId = null;
+        if (window.loadWorkoutState) await window.loadWorkoutState();
+        renderPg();
+        document.dispatchEvent(new Event('workoutUpdated'));
+
+        // Undo: restore session + sets
+        pgShowUndo(`"${sessName}" deleted`, async () => {
+          if (sess) await apexDB.put('workoutSessions', sess);
+          for (const s of savedSets) await apexDB.put('workoutSets', s);
+          if (sess) pgSt.sessions.unshift(sess);
+          pgSt.allSets.push(...savedSets);
+          if (window.loadWorkoutState) await window.loadWorkoutState();
+          renderPg();
+          document.dispatchEvent(new Event('workoutUpdated'));
+          toast('Session restored');
+        });
+      }
+    );
+  };
+
+  window.pgRepeatSession = function (sessId) {
+    const sess = pgSt.sessions.find(s => s.id === sessId);
+    if (!sess) return;
+    const exercises = (sess.exercises || []).map(e => ({ id: e.exerciseId || e.id, name: e.name }));
+    localStorage.setItem('omniRepeatPlan', JSON.stringify({ name: sess.name, exercises }));
+    // Switch to Today tab
+    window.wkState.currentTab = 'today';
+    document.querySelectorAll('#workoutInternalNav .nav-tab').forEach(t => {
+      t.classList.toggle('active', t.dataset.tab === 'today');
+    });
+    window.drawWorkoutPanel();
+    setTimeout(() => toast(`Repeat: ${exercises.map(e=>e.name).slice(0,3).join(', ')}${exercises.length>3?'…':''} — tap Start`), 350);
   };
 
   /* ── Recompute helpers ─────────────────────────────────── */
   async function recomputeSessionTotals(sessId) {
     const sess = await apexDB.get('workoutSessions', sessId);
     if (!sess) return;
-    const sets       = await apexDB.getByIndex('workoutSets', 'sessionId', sessId);
+    const sets        = await apexDB.getByIndex('workoutSets', 'sessionId', sessId);
     const totalVolume = sets.reduce((a, s) => a + (Number(s.weight)||0)*(Number(s.reps)||0), 0);
     sess.totals = { ...(sess.totals||{}), totalVolume, totalSets: sets.length };
     await apexDB.put('workoutSessions', sess);
@@ -1079,9 +1479,9 @@
       if (r > bR) bR = r;
     }
     const rec = (await apexDB.get('personalRecords', exId)) || { id: exId, exerciseId: exId };
-    rec.bestWeight = bW || rec.bestWeight;
-    rec.bestE1RM   = bE || rec.bestE1RM;
-    rec.bestReps   = bR || rec.bestReps;
+    rec.bestWeight  = bW || rec.bestWeight;
+    rec.bestE1RM    = bE || rec.bestE1RM;
+    rec.bestReps    = bR || rec.bestReps;
     rec.lastUpdated = new Date().toISOString();
     await apexDB.put('personalRecords', rec);
     const idx = pgSt.prs.findIndex(p => p.id === exId);
@@ -1092,7 +1492,7 @@
      CHART UTILITIES
      ══════════════════════════════════════════════════════════ */
 
-  // Inline micro-sparkline (SVG polyline, no axes)
+  /* Micro sparkline */
   function sparkline(vals, w=64, h=16, color='#00d4ff') {
     if (!vals || vals.length < 2) return '';
     const mn = Math.min(...vals), mx = Math.max(...vals), rng = mx - mn || 1;
@@ -1106,10 +1506,10 @@
     </svg>`;
   }
 
-  // Full line chart (SVG, responsive via viewBox)
-  function lineChart(data, color='#00d4ff') {
+  /* Full line chart with interactive SVG tooltips */
+  function lineChart(data, color='#00d4ff', unit='') {
     if (!data || data.length < 2) return `<div class="pg-chart-empty">Not enough data</div>`;
-    const vW=380, vH=110, pad={t:12,r:12,b:26,l:40};
+    const vW=380, vH=120, pad={t:14,r:14,b:28,l:42};
     const iW = vW-pad.l-pad.r, iH = vH-pad.t-pad.b;
     const vals = data.map(d=>d.y);
     const mn = Math.min(...vals), mx = Math.max(...vals), rng = mx-mn||1;
@@ -1118,7 +1518,6 @@
       y: pad.t + iH - ((d.y-mn)/rng)*iH,
       d,
     }));
-    // Smooth bezier path
     let pathD = `M${pts[0].x.toFixed(1)} ${pts[0].y.toFixed(1)}`;
     for (let i=1; i<pts.length; i++) {
       const p0=pts[i-1], p1=pts[i];
@@ -1126,23 +1525,27 @@
       pathD += ` C${(p0.x+cx).toFixed(1)} ${p0.y.toFixed(1)},${(p1.x-cx).toFixed(1)} ${p1.y.toFixed(1)},${p1.x.toFixed(1)} ${p1.y.toFixed(1)}`;
     }
     const fillD = `${pathD} L${pts.at(-1).x.toFixed(1)} ${(pad.t+iH).toFixed(1)} L${pts[0].x.toFixed(1)} ${(pad.t+iH).toFixed(1)} Z`;
-    // Grid lines
-    const grid = [0,.5,1].map(f => {
+    const grid  = [0,.5,1].map(f => {
       const gy = pad.t + iH - f*iH, v = mn + f*rng;
       return `<line x1="${pad.l}" y1="${gy.toFixed(1)}" x2="${pad.l+iW}" y2="${gy.toFixed(1)}" stroke="rgba(255,255,255,.05)" stroke-width="1"/>
               <text x="${(pad.l-4).toFixed(1)}" y="${(gy+3.5).toFixed(1)}" text-anchor="end" fill="rgba(255,255,255,.3)" font-size="8" font-family="Inter,sans-serif">${v>=1000?(v/1000).toFixed(1)+'k':Math.round(v)}</text>`;
     }).join('');
-    // X labels (first + last + up to 3 mid)
-    const step = Math.max(1, Math.floor(pts.length/4));
-    const xLbls = pts.filter((_,i) => i===0||i===pts.length-1||i%step===0).map(p =>
-      `<text x="${p.x.toFixed(1)}" y="${(pad.t+iH+17).toFixed(1)}" text-anchor="middle" fill="rgba(255,255,255,.3)" font-size="8" font-family="Inter,sans-serif">${fmtDate(p.d.x,true)}</text>`
+    const step  = Math.max(1, Math.floor(pts.length/4));
+    const xLbls = pts.filter((_,i)=>i===0||i===pts.length-1||i%step===0).map(p =>
+      `<text x="${p.x.toFixed(1)}" y="${(pad.t+iH+18).toFixed(1)}" text-anchor="middle" fill="rgba(255,255,255,.3)" font-size="8" font-family="Inter,sans-serif">${fmtDate(p.d.x,true)}</text>`
     ).join('');
-    // Dots
-    const dots = pts.map(p => `<circle cx="${p.x.toFixed(1)}" cy="${p.y.toFixed(1)}" r="2.5" fill="${color}" opacity=".85"/>`).join('');
+    const dots  = pts.map(p => {
+      const tipLabel = `${fmtDate(p.d.x,true)} · ${unit==='sec'?fmtDur(p.d.y):unit==='kg'||unit==='kg e1RM'?fmtN(p.d.y)+' '+unit:unit==='reps'?Math.round(p.d.y)+' reps':fmtN(p.d.y,2)+' '+unit}`;
+      return `
+        <circle class="pg-dot-hit" cx="${p.x.toFixed(1)}" cy="${p.y.toFixed(1)}" r="4" fill="transparent" stroke="transparent"
+          onmouseenter="pgShowTip(event,'${tipLabel.replace(/'/g,"&#39;")}')"
+          onmouseleave="pgHideTip()"/>
+        <circle cx="${p.x.toFixed(1)}" cy="${p.y.toFixed(1)}" r="2.5" fill="${color}" opacity=".9" pointer-events="none"/>`;
+    }).join('');
     const gid = 'g'+Math.random().toString(36).slice(2,6);
     return `<svg class="pg-chart-svg" viewBox="0 0 ${vW} ${vH}">
       <defs><linearGradient id="${gid}" x1="0" y1="0" x2="0" y2="1">
-        <stop offset="0%" stop-color="${color}" stop-opacity=".2"/>
+        <stop offset="0%" stop-color="${color}" stop-opacity=".22"/>
         <stop offset="100%" stop-color="${color}" stop-opacity="0"/>
       </linearGradient></defs>
       ${grid}
@@ -1152,33 +1555,38 @@
     </svg>`;
   }
 
-  // Bar chart (SVG, responsive)
-  function barChart(data, color='#8b5cf6') {
+  /* Bar chart with tooltips */
+  function barChart(data, color='#8b5cf6', unit='') {
     if (!data || data.length < 2) return `<div class="pg-chart-empty">Not enough data</div>`;
-    const vW=380, vH=96, pad={t:8,r:12,b:22,l:40};
+    const vW=380, vH=100, pad={t:8,r:14,b:24,l:42};
     const iW = vW-pad.l-pad.r, iH = vH-pad.t-pad.b;
     const mx  = Math.max(...data.map(d=>d.y)) || 1;
     const slotW = iW/data.length;
     const barW  = Math.max(4, slotW*0.6);
     const bars  = data.map((d, i) => {
-      const bh = Math.max(2, (d.y/mx)*iH);
-      const x  = pad.l + i*slotW + (slotW-barW)/2;
-      const y  = pad.t + iH - bh;
-      return `<rect x="${x.toFixed(1)}" y="${y.toFixed(1)}" width="${barW.toFixed(1)}" height="${bh.toFixed(1)}" rx="2" fill="${color}" opacity="${(.4+.6*d.y/mx).toFixed(2)}"/>`;
+      const bh  = Math.max(2, (d.y/mx)*iH);
+      const x   = pad.l + i*slotW + (slotW-barW)/2;
+      const y   = pad.t + iH - bh;
+      const tipVal = unit==='kg'?fmtVol(d.y):unit==='sec'?fmtDur(d.y):unit==='reps'?Math.round(d.y)+' reps':fmtN(d.y,1)+' '+unit;
+      const tipLabel = `${fmtDate(d.x,true)} · ${tipVal}`;
+      return `
+        <rect class="pg-dot-hit" x="${x.toFixed(1)}" y="${y.toFixed(1)}" width="${barW.toFixed(1)}" height="${bh.toFixed(1)}" rx="2" fill="${color}" opacity="${(.38+.62*d.y/mx).toFixed(2)}"
+          onmouseenter="pgShowTip(event,'${tipLabel.replace(/'/g,"&#39;")}')"
+          onmouseleave="pgHideTip()"/>`;
     }).join('');
+    const yLbl = mx>=1000 ? (mx/1000).toFixed(1)+'k' : Math.round(mx);
     const xLbls = [0, data.length-1].map(i => {
       const x = pad.l + i*slotW + slotW/2;
-      return `<text x="${x.toFixed(1)}" y="${(pad.t+iH+15).toFixed(1)}" text-anchor="middle" fill="rgba(255,255,255,.3)" font-size="8" font-family="Inter,sans-serif">${fmtDate(data[i].x,true)}</text>`;
+      return `<text x="${x.toFixed(1)}" y="${(pad.t+iH+16).toFixed(1)}" text-anchor="middle" fill="rgba(255,255,255,.3)" font-size="8" font-family="Inter,sans-serif">${fmtDate(data[i].x,true)}</text>`;
     }).join('');
-    const yMax = mx>=1000 ? (mx/1000).toFixed(1)+'k' : Math.round(mx);
     return `<svg class="pg-chart-svg" viewBox="0 0 ${vW} ${vH}">
       <line x1="${pad.l}" y1="${pad.t+iH}" x2="${pad.l+iW}" y2="${pad.t+iH}" stroke="rgba(255,255,255,.07)" stroke-width="1"/>
-      <text x="${(pad.l-4).toFixed(1)}" y="${(pad.t+6).toFixed(1)}" text-anchor="end" fill="rgba(255,255,255,.3)" font-size="8" font-family="Inter,sans-serif">${yMax}</text>
+      <text x="${(pad.l-4).toFixed(1)}" y="${(pad.t+8).toFixed(1)}" text-anchor="end" fill="rgba(255,255,255,.3)" font-size="8" font-family="Inter,sans-serif">${yLbl}</text>
       ${bars}${xLbls}
     </svg>`;
   }
 
-  // Bar sparkline (HTML divs, for Overview weekly charts)
+  /* Bar sparkline (HTML, for Overview weekly charts) */
   function barSparkline(data, color) {
     if (!data || data.length<2) return `<div class="pg-chart-empty">Not enough data</div>`;
     const mx = Math.max(...data.map(d=>d.v)) || 1;
@@ -1190,13 +1598,13 @@
           <div style="flex:1;display:flex;align-items:flex-end;width:100%;padding:0 1px;">
             <div style="width:100%;height:${h}px;background:${color};border-radius:3px 3px 0 0;opacity:${(.35+.65*pct).toFixed(2)};"></div>
           </div>
-          <span style="font-size:8px;color:rgba(255,255,255,.25);white-space:nowrap;text-align:center;overflow:hidden;max-width:100%;">${d.l.split(' ').slice(0,1).join('')}</span>
+          <span style="font-size:8px;color:rgba(255,255,255,.25);white-space:nowrap;text-align:center;overflow:hidden;max-width:100%;">${d.l.split(' ')[0]}</span>
         </div>`;
     }).join('');
     return `<div style="display:flex;align-items:flex-end;gap:2px;height:74px;padding:0 2px;">${bars}</div>`;
   }
 
-  // Consistency heatmap (16 weeks)
+  /* Consistency heatmap */
   function drawHeatmap(sessions) {
     const WEEKS = 16;
     const now   = new Date();
@@ -1205,7 +1613,6 @@
       const d = new Date(s.startedAt);
       sessSet.add(`${d.getFullYear()}-${d.getMonth()}-${d.getDate()}`);
     }
-    // Start: beginning of the week (Sun) that is WEEKS-1 weeks ago
     const start = new Date(now);
     start.setDate(start.getDate() - start.getDay() - (WEEKS-1)*7);
     start.setHours(0,0,0,0);
@@ -1220,11 +1627,10 @@
       const isToday = cur.toDateString() === now.toDateString();
       const title   = cur.toLocaleDateString('en-US',{month:'short',day:'numeric'}) + (on?' · Session':'');
       cells += `<div class="pg-heatmap-cell${on?' on':''}" title="${title}"
-        style="${isFut?'opacity:.25;':''}${isToday?'box-shadow:0 0 0 1.5px rgba(0,212,255,.6);':''}"
+        style="${isFut?'opacity:.2;':''}${isToday?'box-shadow:0 0 0 1.5px rgba(0,212,255,.6);':''}"
       ></div>`;
       cur.setDate(cur.getDate()+1);
     }
-    // Month labels
     let mLabels = '';
     const cm = new Date(start);
     let lastMo = -1;
@@ -1247,17 +1653,17 @@
         </div>
         <div style="display:flex;align-items:center;gap:5px;margin-top:10px;justify-content:flex-end;">
           <span style="font-size:9px;color:rgba(255,255,255,.25);">Less</span>
-          ${[.06,.2,.4,.6,.88].map(o=>`<div style="width:10px;height:10px;border-radius:2px;background:rgba(57,255,20,${o});"></div>`).join('')}
+          ${[.06,.2,.4,.65,.9].map(o=>`<div style="width:10px;height:10px;border-radius:2px;background:rgba(57,255,20,${o});"></div>`).join('')}
           <span style="font-size:9px;color:rgba(255,255,255,.25);">More</span>
         </div>
       </div>`;
   }
 
-  /* ── Bucketing for Overview sparklines ─────────────────── */
+  /* ── Bucketing ─────────────────────────────────────────── */
   function weekBuckets(sessions, n) {
     const now = new Date(); const out = [];
     for (let i=n-1; i>=0; i--) {
-      const end = new Date(now); end.setDate(end.getDate()-i*7); end.setHours(23,59,59,999);
+      const end   = new Date(now); end.setDate(end.getDate()-i*7); end.setHours(23,59,59,999);
       const start = new Date(end); start.setDate(start.getDate()-6); start.setHours(0,0,0,0);
       const v = sessions.filter(s=>{const d=new Date(s.startedAt);return d>=start&&d<=end;}).length;
       out.push({l:start.toLocaleDateString('en-US',{month:'short',day:'numeric'}),v});
@@ -1267,17 +1673,38 @@
   function weekVolBuckets(sessions, n) {
     const now = new Date(); const out = [];
     for (let i=n-1; i>=0; i--) {
-      const end = new Date(now); end.setDate(end.getDate()-i*7); end.setHours(23,59,59,999);
+      const end   = new Date(now); end.setDate(end.getDate()-i*7); end.setHours(23,59,59,999);
       const start = new Date(end); start.setDate(start.getDate()-6); start.setHours(0,0,0,0);
-      const v = sessions
-        .filter(s=>{const d=new Date(s.startedAt);return d>=start&&d<=end;})
+      const v = sessions.filter(s=>{const d=new Date(s.startedAt);return d>=start&&d<=end;})
         .reduce((a,s)=>a+(s.totals?.totalVolume||0),0);
       out.push({l:start.toLocaleDateString('en-US',{month:'short',day:'numeric'}),v});
     }
     return out;
   }
+  function weekSetBuckets(sessions, allSets, n) {
+    const now = new Date(); const out = [];
+    for (let i=n-1; i>=0; i--) {
+      const end   = new Date(now); end.setDate(end.getDate()-i*7); end.setHours(23,59,59,999);
+      const start = new Date(end); start.setDate(start.getDate()-6); start.setHours(0,0,0,0);
+      const sessIds = new Set(sessions.filter(s=>{const d=new Date(s.startedAt);return d>=start&&d<=end;}).map(s=>s.id));
+      const v = allSets.filter(s=>sessIds.has(s.sessionId)).length;
+      out.push({l:start.toLocaleDateString('en-US',{month:'short',day:'numeric'}),v});
+    }
+    return out;
+  }
+  function weekTimeBuckets(sessions, n) {
+    const now = new Date(); const out = [];
+    for (let i=n-1; i>=0; i--) {
+      const end   = new Date(now); end.setDate(end.getDate()-i*7); end.setHours(23,59,59,999);
+      const start = new Date(end); start.setDate(start.getDate()-6); start.setHours(0,0,0,0);
+      const v = sessions.filter(s=>{const d=new Date(s.startedAt);return d>=start&&d<=end;})
+        .reduce((a,s)=>a+(s.totals?.durationSec||0),0);
+      out.push({l:start.toLocaleDateString('en-US',{month:'short',day:'numeric'}),v});
+    }
+    return out;
+  }
 
-  /* ── Reusable UI snippets ──────────────────────────────── */
+  /* ── Reusable UI ───────────────────────────────────────── */
   function chartCard(title, peak, svgOrHtml) {
     return `
       <div class="pg-chart-card">
@@ -1292,12 +1719,11 @@
     return `<div class="pg-empty" style="padding:30px 10px;"><div class="pg-empty-title">${msg}</div></div>`;
   }
 
-  /* ── Expose pgSt for deep-link use ─────────────────────── */
+  /* ── Expose & reactivity ───────────────────────────────── */
   window.pgSt = pgSt;
 
-  /* ── Refresh on workout update ─────────────────────────── */
   document.addEventListener('workoutUpdated', async () => {
-    if (window.wkState && window.wkState.currentTab === 'progress') {
+    if (window.wkState && (window.wkState.currentTab === 'progress' || window.wkState.currentTab === 'history')) {
       await loadData();
       renderPg();
     }

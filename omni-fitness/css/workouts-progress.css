@@ -1,5 +1,5 @@
 /* ────────────────────────────────────────────────────────────
-   WORKOUTS · PROGRESS  (Full Feature Master)
+   WORKOUTS · PROGRESS  — Final Master Edition
    Namespace: .pg-*
    ──────────────────────────────────────────────────────────── */
 
@@ -49,7 +49,7 @@
 
 /* === Split Layout (List + Detail) ===================== */
 .pg-split {
-  display:grid; grid-template-columns:280px 1fr;
+  display:grid; grid-template-columns:290px 1fr;
   gap:16px; min-height:480px;
 }
 @media(max-width:860px) { .pg-split { grid-template-columns:1fr; } }
@@ -80,12 +80,40 @@
 .pg-li-body { min-width:0; flex:1; }
 .pg-li-name { font-size:13px; font-weight:700; color:var(--text); white-space:nowrap; overflow:hidden; text-overflow:ellipsis; margin-bottom:2px; }
 .pg-li-sub { font-size:11px; color:var(--muted); font-weight:500; }
-.pg-li-right { text-align:right; flex-shrink:0; }
+.pg-li-right { text-align:right; flex-shrink:0; display:flex; flex-direction:column; align-items:flex-end; gap:4px; }
 .pg-li-stat { font-size:11px; font-weight:700; color:var(--teal); font-family:'Space Grotesk',Inter,sans-serif; }
 .pg-li-spark { margin-top:3px; opacity:.7; line-height:0; }
 
 /* Detail pane */
 .pg-detail-pane { display:flex; flex-direction:column; gap:14px; min-width:0; }
+
+/* === Trend Tags ======================================== */
+.pg-trend-tag {
+  display:inline-flex; align-items:center; gap:3px; padding:2px 7px;
+  border-radius:6px; font-size:9px; font-weight:900; letter-spacing:.08em; text-transform:uppercase;
+}
+.pg-trend-tag.up   { background:rgba(57,255,20,.1);  color:var(--green); }
+.pg-trend-tag.down { background:rgba(255,77,95,.1);  color:var(--danger); }
+.pg-trend-tag.stable { background:rgba(255,255,255,.06); color:var(--muted); }
+
+/* === Favorites ========================================= */
+.pg-pin-btn {
+  width:22px; height:22px; border-radius:6px; border:none;
+  background:transparent; color:var(--muted); cursor:pointer;
+  display:grid; place-items:center; font-size:12px;
+  transition:.15s; padding:0;
+}
+.pg-pin-btn:hover { color:var(--text); }
+.pg-pin-btn.pinned { color:#FFD700; }
+
+.pg-fav-chip {
+  display:inline-flex; align-items:center; gap:5px; padding:5px 12px;
+  border-radius:20px; font-size:10px; font-weight:900; letter-spacing:.08em;
+  cursor:pointer; transition:.15s; border:1px solid var(--line);
+  background:transparent; color:var(--muted); font-family:inherit;
+}
+.pg-fav-chip.active { background:rgba(255,215,0,.1); color:#FFD700; border-color:rgba(255,215,0,.35); }
+.pg-fav-chip:hover:not(.active) { border-color:var(--line-strong); color:var(--text); }
 
 /* === Stat Cards (Overview) ============================ */
 .pg-stat-grid {
@@ -105,6 +133,15 @@
 .pg-stat-val { font-family:'Space Grotesk',Inter,sans-serif; font-size:26px; font-weight:800; letter-spacing:-.02em; color:var(--text); line-height:1; margin:0 0 3px; }
 .pg-stat-sub { font-size:11px; color:var(--muted); font-weight:500; }
 
+/* Delta badge on stat cards */
+.pg-delta {
+  display:inline-flex; align-items:center; gap:2px;
+  font-size:10px; font-weight:800; letter-spacing:.03em; margin-top:4px;
+}
+.pg-delta.pos { color:var(--green); }
+.pg-delta.neg { color:var(--danger); }
+.pg-delta.neu { color:var(--muted); }
+
 /* === Chart Cards ======================================= */
 .pg-chart-card {
   background:rgba(255,255,255,.02); border:1px solid var(--line);
@@ -122,6 +159,52 @@
   color:var(--muted); font-size:13px; font-weight:500; opacity:.7;
 }
 
+/* === Chart Tooltip ===================================== */
+.pg-chart-tip {
+  display:none; position:fixed; z-index:9999;
+  background:linear-gradient(135deg,rgba(12,18,26,.97),rgba(6,10,16,.99));
+  border:1px solid rgba(0,212,255,.25); border-radius:10px;
+  padding:7px 12px; font-size:12px; font-weight:700; color:var(--text);
+  pointer-events:none; box-shadow:0 8px 28px rgba(0,0,0,.55);
+  white-space:nowrap; letter-spacing:.01em;
+  animation:fadeUp .12s ease;
+}
+
+/* SVG circle hover target */
+.pg-dot-hit {
+  cursor:crosshair; transition:r .12s;
+}
+
+/* === Workload Panel ==================================== */
+.pg-workload-grid {
+  display:grid; grid-template-columns:repeat(auto-fill,minmax(120px,1fr));
+  gap:10px; margin-top:4px;
+}
+.pg-workload-item {
+  background:rgba(255,255,255,.02); border:1px solid var(--line);
+  border-radius:14px; padding:12px; text-align:center;
+}
+.pg-workload-val { font-family:'Space Grotesk',Inter,sans-serif; font-size:20px; font-weight:800; color:var(--text); line-height:1; margin-bottom:3px; }
+.pg-workload-lbl { font-size:9px; text-transform:uppercase; letter-spacing:.14em; color:var(--muted); font-weight:900; }
+
+/* === Set Type Distribution ============================= */
+.pg-dist-row { display:flex; gap:10px; flex-wrap:wrap; margin-top:6px; align-items:center; }
+.pg-dist-bar { height:8px; border-radius:4px; flex:1; min-width:60px; overflow:hidden; display:flex; }
+.pg-dist-seg { height:100%; transition:flex .3s ease; }
+.pg-dist-legend { display:flex; gap:12px; flex-wrap:wrap; margin-top:10px; }
+.pg-dist-legend-item { display:flex; align-items:center; gap:5px; font-size:10px; font-weight:700; color:var(--soft); }
+.pg-dist-legend-dot { width:8px; height:8px; border-radius:50%; flex-shrink:0; }
+
+/* === Routine Insights ================================== */
+.pg-routine-grid { display:grid; grid-template-columns:repeat(auto-fill,minmax(160px,1fr)); gap:10px; margin-top:4px; }
+.pg-routine-item {
+  background:rgba(255,255,255,.02); border:1px solid var(--line);
+  border-radius:14px; padding:12px;
+}
+.pg-routine-item-lbl { font-size:9px; text-transform:uppercase; letter-spacing:.14em; color:var(--muted); font-weight:900; margin-bottom:5px; }
+.pg-routine-item-val { font-size:13px; font-weight:700; color:var(--text); white-space:nowrap; overflow:hidden; text-overflow:ellipsis; }
+.pg-routine-item-sub { font-size:11px; color:var(--teal); font-weight:600; margin-top:2px; }
+
 /* === PR Hub ============================================ */
 .pg-pr-section { margin-bottom:26px; }
 .pg-pr-section-title {
@@ -131,7 +214,7 @@
 .pg-pr-grid { display:grid; grid-template-columns:repeat(auto-fill,minmax(240px,1fr)); gap:10px; }
 .pg-pr-card {
   background:rgba(255,255,255,.025); border:1px solid var(--line);
-  border-radius:16px; padding:14px 16px; display:flex; align-items:center;
+  border-radius:16px; padding:14px 16px; display:flex; align-items:flex-start;
   gap:12px; transition:.18s; cursor:pointer;
 }
 .pg-pr-card:hover { background:rgba(57,255,20,.05); border-color:rgba(57,255,20,.28); transform:translateY(-1px); }
@@ -140,10 +223,22 @@
 .pg-pr-name { font-size:13px; font-weight:700; color:var(--text); white-space:nowrap; overflow:hidden; text-overflow:ellipsis; margin-bottom:2px; }
 .pg-pr-val { font-family:'Space Grotesk',Inter,sans-serif; font-size:16px; font-weight:800; color:var(--green); }
 .pg-pr-date { font-size:10px; color:var(--muted); font-weight:600; margin-top:1px; }
+.pg-pr-context { font-size:10px; color:var(--soft); font-weight:600; margin-top:3px; }
+.pg-pr-delta { font-size:10px; font-weight:800; margin-top:2px; }
+.pg-pr-delta.pos { color:var(--green); }
+.pg-pr-delta.neu { color:var(--muted); }
 .pg-pr-badge {
   display:inline-flex; align-items:center; gap:4px; padding:3px 9px; border-radius:8px;
   font-size:10px; font-weight:800; letter-spacing:.06em;
   background:rgba(57,255,20,.1); color:var(--green); border:1px solid rgba(57,255,20,.25);
+}
+
+/* === Plateau Warning ==================================== */
+.pg-plateau-tag {
+  display:inline-flex; align-items:center; gap:5px; padding:4px 10px;
+  border-radius:8px; font-size:10px; font-weight:800;
+  background:rgba(255,122,0,.1); color:var(--orange);
+  border:1px solid rgba(255,122,0,.25);
 }
 
 /* === Sessions ========================================== */
@@ -173,7 +268,8 @@
 /* Exercise blocks within session */
 .pg-ex-block { background:rgba(255,255,255,.02); border:1px solid var(--line); border-radius:16px; overflow:hidden; }
 .pg-ex-block-head { display:flex; align-items:center; justify-content:space-between; padding:12px 16px; border-bottom:1px solid var(--line); background:rgba(255,255,255,.02); }
-.pg-ex-block-name { font-size:13px; font-weight:800; color:var(--text); }
+.pg-ex-block-name { font-size:13px; font-weight:800; color:var(--text); cursor:pointer; }
+.pg-ex-block-name:hover { color:var(--teal); }
 .pg-ex-block-type { font-size:10px; color:var(--muted); font-weight:600; margin-top:2px; }
 
 /* Sets table */
@@ -201,7 +297,6 @@
 .pg-heatmap { display:grid; grid-auto-flow:column; grid-template-rows:repeat(7,12px); gap:3px; width:max-content; }
 .pg-heatmap-cell { width:12px; height:12px; border-radius:3px; background:rgba(255,255,255,.05); }
 .pg-heatmap-cell.on { background:rgba(57,255,20,.6); box-shadow:0 0 6px rgba(57,255,20,.25); }
-.pg-heatmap-cell.on-hi { background:rgba(57,255,20,.88); box-shadow:0 0 8px rgba(57,255,20,.4); }
 
 /* === Calendar View ==================================== */
 .pg-cal-grid { display:grid; grid-template-columns:repeat(7,1fr); gap:5px; }
@@ -239,6 +334,8 @@
 .pg-btn.teal:hover { background:rgba(0,212,255,.16); }
 .pg-btn.green { background:rgba(57,255,20,.08); color:var(--green); border-color:rgba(57,255,20,.25); }
 .pg-btn.green:hover { background:rgba(57,255,20,.14); }
+.pg-btn.orange { background:rgba(255,122,0,.08); color:var(--orange); border-color:rgba(255,122,0,.25); }
+.pg-btn.orange:hover { background:rgba(255,122,0,.14); }
 .pg-btn.danger { background:rgba(255,77,95,.08); color:var(--danger); border-color:rgba(255,77,95,.25); }
 .pg-btn.danger:hover { background:rgba(255,77,95,.15); }
 .pg-btn.sm { padding:5px 10px; font-size:11px; border-radius:9px; }
@@ -285,10 +382,55 @@
 .pg-modal-input:focus { border-color:rgba(0,212,255,.45); background:rgba(0,212,255,.04); }
 .pg-modal-actions { display:flex; gap:10px; margin-top:22px; justify-content:flex-end; }
 
+/* === Custom Confirm Dialog ============================= */
+.pg-confirm-overlay {
+  position:fixed; inset:0; background:rgba(0,0,0,.8); backdrop-filter:blur(12px);
+  z-index:10000; display:flex; align-items:center; justify-content:center;
+  padding:20px; animation:fadeUp .18s ease;
+}
+.pg-confirm-box {
+  background:linear-gradient(180deg,rgba(12,18,26,.98),rgba(6,10,16,.99));
+  border:1px solid rgba(255,77,95,.28); border-radius:22px; padding:26px;
+  max-width:380px; width:100%; box-shadow:0 24px 70px rgba(0,0,0,.7);
+}
+.pg-confirm-icon { font-size:32px; text-align:center; margin-bottom:14px; }
+.pg-confirm-msg { font-size:15px; font-weight:700; color:var(--text); text-align:center; margin-bottom:8px; line-height:1.45; }
+.pg-confirm-sub { font-size:12px; color:var(--muted); text-align:center; margin-bottom:22px; }
+.pg-confirm-btns { display:flex; gap:10px; justify-content:flex-end; }
+
+/* === Undo Toast ======================================== */
+.pg-undo-toast {
+  position:fixed; bottom:28px; left:50%; transform:translateX(-50%);
+  z-index:9998; display:flex; align-items:center; gap:14px;
+  background:linear-gradient(135deg,rgba(12,18,26,.97),rgba(6,10,16,.99));
+  border:1px solid rgba(0,212,255,.25); border-radius:16px;
+  padding:13px 18px; box-shadow:0 12px 40px rgba(0,0,0,.55);
+  animation:slideUp .22s cubic-bezier(.16,1,.3,1);
+  font-size:13px; font-weight:700; color:var(--text);
+  white-space:nowrap;
+}
+@keyframes slideUp { from { transform:translateX(-50%) translateY(20px); opacity:0; } to { transform:translateX(-50%) translateY(0); opacity:1; } }
+.pg-undo-btn {
+  padding:5px 13px; border-radius:9px; font-size:11px; font-weight:900;
+  background:rgba(0,212,255,.15); color:var(--teal);
+  border:1px solid rgba(0,212,255,.35); cursor:pointer; font-family:inherit;
+  transition:.15s; letter-spacing:.04em;
+}
+.pg-undo-btn:hover { background:rgba(0,212,255,.25); }
+
+/* === Totals Banner ===================================== */
+.pg-update-banner {
+  display:flex; align-items:center; gap:8px; padding:9px 14px;
+  border-radius:11px; font-size:12px; font-weight:700;
+  background:rgba(57,255,20,.08); color:var(--green);
+  border:1px solid rgba(57,255,20,.22); animation:fadeUp .2s ease;
+}
+
 /* === Responsive ======================================= */
 @media(max-width:600px) {
   .pg-stat-grid { grid-template-columns:repeat(2,1fr); }
   .pg-pr-grid { grid-template-columns:1fr; }
   .pg-sess-totals { gap:14px; }
   .pg-stat-val { font-size:22px; }
+  .pg-workload-grid { grid-template-columns:repeat(2,1fr); }
 }

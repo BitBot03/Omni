@@ -29,18 +29,50 @@ A comprehensive fitness tracking dashboard built as a Single Page Application (S
 └── app/                  # Legacy/applet directory
 ```
 
-## Workouts Progress Tab
-Full-featured Progress subtab at `omni-fitness/js/tabs/workouts/progress.js` (IIFE module):
+## Workouts Progress Tab — Final Master Edition
+Full-featured Progress subtab at `omni-fitness/js/tabs/workouts/progress.js` (IIFE, 1733 lines, 82KB):
 - **Entry point**: `window.renderTabProgress(container)` — called by workouts.js router
 - **CSS**: `omni-fitness/css/workouts-progress.css` (`.pg-*` namespace, linked in index.html)
-- **Segments**: Overview · Exercises · Records (PRs) · Sessions — segmented control + date range filter (7d/30d/90d/YTD/All)
-- **Overview**: 6 stat cards, 16-week consistency heatmap, weekly session/volume bar sparklines, quick actions, recent PRs panel
-- **Exercises**: Left list (search, sparklines, session count) + right detail with SVG line/bar charts per tracking type (weight_reps: e1RM/top-weight/volume; bodyweight: reps; time; distance), all-time best sets table, sessions list
-- **Records**: PRs grouped by tracking type (weight+reps, bodyweight, timed, cardio) with auto-update on set edit
-- **Sessions**: List view (search) + calendar view (current month); right panel shows full exercise/set breakdown with inline edit & delete buttons
-- **Edit flow**: Edit set modal → save → recompute session totals → recompute PRs → refresh detail panel → emit `workoutUpdated`
-- **SVG charts**: `lineChart()` (smooth bezier + gradient fill), `barChart()`, `sparkline()` (polyline), `barSparkline()` (HTML divs), `drawHeatmap()` (HTML grid)
-- **Global handlers**: `pgSetSeg`, `pgSetRange`, `pgSelectEx`, `pgSelectSess`, `pgSetSessView`, `pgEditSetModal`, `pgSaveSet`, `pgDeleteSet`, `pgDeleteSession`, `pgSt_openLastSess`, `pgSt_openExFromOverview`
+- **Nav**: 4 tabs (Today, Routines, Exercises, Progress) — History tab removed; `history.js` redirects to Progress/Sessions
+
+### Phase 0 — Cleanup
+- History subtab removed from nav in `workouts.js`; `history.js` delegates to `renderTabProgress` with seg='sessions'
+
+### Phase 1 — Pro UX
+- **Deep links**: `pgSt_openLastSess`, `pgSt_openExFromOverview`, `pgSt_openExAndHighlightPR`, `pgSt_openSessFromEx`
+- **SVG Chart Tooltips**: `pgShowTip(event, text)` / `pgHideTip()` — floating fixed-position tooltip on circle/rect hover
+- **Favorites**: `omniPgFavs` in localStorage; ⭐ pin button on each exercise; "Pinned" filter chip
+
+### Phase 2 — Intelligence
+- **Delta badges** on Overview stat cards: computes previous period (same duration) and shows ▲/▼ with absolute + percentage
+- **Trend tags**: linear regression slope over last 6 sessions → Up/Stable/Down color tag on exercise list items + detail header
+- **PR Enrichment**: context line (e.g. "6 reps @ 100 kg"), delta vs prev best set, "NEW" badge for in-range PRs
+- **Plateau detection**: ≥6 sessions with no improvement → ⚠ warning tag in exercise detail header
+
+### Phase 3 — Workload & Structure
+- **Workload panel**: avg sessions/sets/tonnage/time per week over selected range (via `weekBuckets`, `weekSetBuckets`, etc.)
+- **Set Type Distribution**: stacked color bar (working/warmup/drop/failure) with percentage legend
+- **Training Insights**: most-frequent session name, highest-volume session name
+
+### Phase 4 — Sessions Polish
+- **Custom confirm dialog**: `pgConfirm(msg, sub, label, onConfirm)` — replaces `window.confirm()` for delete actions
+- **Undo toast**: `pgShowUndo(msg, undoFn)` — 5-second toast with Undo button after delete set/session
+- **"Totals updated" banner**: shown in session detail after set edit/delete
+- **"Repeat" button**: stores exercise list in `omniRepeatPlan` localStorage key, switches to Today tab
+- **Clickable exercise names** in session detail → drill into Exercises tab
+
+### Chart Utilities
+- `lineChart(data, color, unit)` — smooth bezier + gradient fill SVG with interactive tooltips
+- `barChart(data, color, unit)` — bar chart SVG with tooltips
+- `sparkline(vals, w, h, color)` — inline polyline SVG for list items
+- `barSparkline(data, color)` — HTML div bars for overview panels
+- `drawHeatmap(sessions)` — 16-week HTML grid with day labels and month markers
+
+### Key Global Handlers
+`pgSetSeg`, `pgSetRange`, `pgSelectEx`, `pgSelectSess`, `pgSetSessView`, `pgToggleFav`, `pgToggleFavOnly`, `pgEditSetModal`, `pgSaveSet`, `pgDeleteSet`, `pgDeleteSession`, `pgRepeatSession`, `pgSt_openLastSess`, `pgSt_openExFromOverview`, `pgSt_openExAndHighlightPR`, `pgSt_openSessFromEx`, `pgShowTip`, `pgHideTip`
+
+### State
+`window.pgSt` — module state (seg, range, selExId, selSessId, sessView, exSearch, sessSearch, exFavOnly, sessions, allSets, library, prs, routines)
 
 ## Workouts Today Tab — Runner Logic
 The workout runner (`omni-fitness/js/tabs/workouts/today-runner.js`) was fully fixed:

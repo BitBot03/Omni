@@ -1,3 +1,5 @@
+// History tab redirects to Progress > Sessions
 window.renderTabHistory = function(container) {
-    container.innerHTML = `<div class="card"><p>History log coming soon...</p></div>`;
+    if (window.pgSt) window.pgSt.seg = 'sessions';
+    if (window.renderTabProgress) window.renderTabProgress(container);
 };

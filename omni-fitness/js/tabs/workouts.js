@@ -19,8 +19,6 @@ window.loadWorkoutState = async function() {
     window.wkState.routines = await apexDB.getAll('routines');
     window.wkState.history = await apexDB.getAll('workoutSessions');
     window.wkState.history.sort((a,b) => new Date(b.startedAt) - new Date(a.startedAt));
-    
-    // Check for cached active session
     window.wkState.activeSession = await apexDB.get('activeSession', 'active');
 };
 
@@ -36,28 +34,34 @@ window.stickFigure = function(type="push") {
 // ----------------------------------------------------
 window.renderWorkouts = async function() {
     view().innerHTML = `<div class="page"><p class="muted" style="text-align:center; margin-top:40px;">Booting Workout Engine...</p></div>`;
-    
+
     await window.loadWorkoutState();
-    
+
+    // If currentTab is 'history', redirect to progress/sessions
+    if (window.wkState.currentTab === 'history') {
+        window.wkState.currentTab = 'progress';
+        if (window.pgSt) window.pgSt.seg = 'sessions';
+    }
+
     view().innerHTML = `
         <section class="page workouts-page">
             ${header("Training Engine", "Workouts")}
-            
+
             <div class="nav-tabs" id="workoutInternalNav" style="margin-bottom: 24px;">
                 <button class="nav-tab ${window.wkState.currentTab==='today'?'active':''}" data-tab="today">Today</button>
                 <button class="nav-tab ${window.wkState.currentTab==='routines'?'active':''}" data-tab="routines">Routines</button>
                 <button class="nav-tab ${window.wkState.currentTab==='exercises'?'active':''}" data-tab="exercises">Exercises</button>
-                <button class="nav-tab ${window.wkState.currentTab==='history'?'active':''}" data-tab="history">History</button>
-                <button class="nav-tab ${window.wkState.currentTab==='progress'?'active':''}" data-tab="progress">Progress</button>
+                <button class="nav-tab ${window.wkState.currentTab==='progress'||window.wkState.currentTab==='history'?'active':''}" data-tab="progress">Progress</button>
             </div>
-            
+
             <div id="wkPanelContainer"></div>
         </section>
     `;
 
     document.querySelectorAll('#workoutInternalNav .nav-tab').forEach(b => {
         b.onclick = () => {
-            window.wkState.currentTab = b.dataset.tab;
+            const tab = b.dataset.tab;
+            window.wkState.currentTab = tab;
             document.querySelectorAll('#workoutInternalNav .nav-tab').forEach(t => t.classList.remove('active'));
             b.classList.add('active');
             window.drawWorkoutPanel();
@@ -70,12 +74,11 @@ window.renderWorkouts = async function() {
 window.drawWorkoutPanel = function() {
     const container = document.getElementById('wkPanelContainer');
     if (!container) return;
-    
+
     if (window.wkState.currentTab === 'today') window.renderTabToday(container);
     if (window.wkState.currentTab === 'routines') window.renderTabRoutines(container);
     if (window.wkState.currentTab === 'exercises') window.renderTabExercises(container);
-    if (window.wkState.currentTab === 'history') window.renderTabHistory(container);
-    if (window.wkState.currentTab === 'progress') window.renderTabProgress(container);
+    if (window.wkState.currentTab === 'history' || window.wkState.currentTab === 'progress') window.renderTabProgress(container);
 };
 
 // Global Event Listener for Reactivity
